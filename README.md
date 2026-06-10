@@ -63,7 +63,7 @@ guest mode.
 | `s` | shuffle queue | `r` | repeat |
 | `v` | cycle visualizer | `c` | cycle color theme |
 | `w` | work mode (no art) | `f` | fullscreen |
-| `p` | hi-def plasma pixels | `x` | drop from queue |
+| `p` | hi-def plasma pixels | | |
 | `1`-`4` / `tab` | switch view | `esc` / `h` | back out of playlist |
 | `q` | quit | | |
 
