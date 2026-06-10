@@ -782,6 +782,7 @@ class App:
         self.picker_track = None
         self._confirm_del = ("", 0.0)
         self._now_wt = 0.0
+        self._like_t = 0.0    # timestamp of last like → heart splash
         self.status = ""
         self.status_t = 0.0
         self.searching = False
@@ -1019,6 +1020,7 @@ class App:
         if not self.authed:
             self.say("liking needs sign-in → ytm --login")
             return
+        self._like_t = time.time()   # heart splash, optimistic
 
         def work():
             try:
@@ -1065,6 +1067,7 @@ class App:
             try:
                 if pl.playlist_id == "LM":      # Liked Music is rate-based
                     self.yt.rate_song(track.video_id, "LIKE")
+                    self._like_t = time.time()
                 else:
                     self.yt.add_playlist_items(pl.playlist_id,
                                                [track.video_id])
@@ -1522,7 +1525,49 @@ class App:
 
         while len(out) < h:
             out.append(crop_pad("", w))
-        return out[:h]
+        out = out[:h]
+        t = time.time() - self._like_t
+        if t < 1.4:
+            out = self._like_splash(out, w, t)
+        return out
+
+    def _like_splash(self, out, w, t):
+        """Big pulsing heart stamped over the panel right after a like.
+        The shape is the classic (x²+y²−1)³ = x²y³ curve, scaled up as
+        it pops in, colored with a red↔pink pulse."""
+        import numpy as np
+        h = len(out)
+        rows = min(14, max(6, h - 6))
+        cols = min(rows * 2, w - 6)
+        s = min(1.0, 0.35 + t * 3.5)             # pop-in scale
+        c = lerp(RED, PINK, 0.5 + 0.5 * math.sin(t * 9))
+        xs = np.linspace(-1.45, 1.45, cols)[None, :] / s
+        ys = np.linspace(1.35, -1.45, rows * 2)[:, None] / s
+        inside = (xs ** 2 + ys ** 2 - 1) ** 3 - xs ** 2 * ys ** 3 < 0
+        pad_l = (w - cols) // 2
+        band0 = max(1, (h - rows - 2) // 2)
+        col = fg(c)
+        for r in range(rows):
+            if band0 + r >= h - 1:
+                break
+            top, bot = inside[r * 2], inside[r * 2 + 1]
+            cells = []
+            for i in range(cols):
+                if top[i] and bot[i]:
+                    cells.append("█")
+                elif top[i]:
+                    cells.append("▀")
+                elif bot[i]:
+                    cells.append("▄")
+                else:
+                    cells.append(" ")
+            out[band0 + r] = crop_pad(
+                " " * pad_l + col + "".join(cells) + RESET, w)
+        if band0 + rows < h - 1 and t > 0.25:
+            label = "L I K E D"
+            out[band0 + rows] = crop_pad(
+                BOLD + fg(WHITE) + f"{label:^{w}}" + RESET, w)
+        return out
 
     def _viz_color(self, hfrac):
         """Vertical gradient: red base → orange mids → pink peaks."""
