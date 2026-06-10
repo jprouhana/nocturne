@@ -836,6 +836,33 @@ class App:
         return self.queue
 
     # ── data fetching (background threads) ───────────────────────────────────
+    def _auth_refresh(self):
+        """Google rotates session cookies; quietly re-import a fresh set
+        from the browser and rebuild the client."""
+        try:
+            import io
+            import contextlib
+            from ytmusicapi import YTMusic
+            with contextlib.redirect_stdout(io.StringIO()):
+                ok = import_firefox_auth()
+            if ok:
+                self.yt = YTMusic(AUTH_FILE)
+                self.authed = True
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _lib_call(self, fn):
+        """Run a library call; on failure refresh auth from the browser
+        once and retry (stale-cookie sessions look signed-out)."""
+        try:
+            return fn()
+        except Exception:
+            if self._auth_refresh():
+                self.say("session went stale — refreshed from your browser")
+                return fn()
+            raise
     def do_search(self, query):
         self.searching = True
 
@@ -869,7 +896,8 @@ class App:
 
         def work():
             try:
-                data = self.yt.get_liked_songs(limit=300)
+                data = self._lib_call(
+                    lambda: self.yt.get_liked_songs(limit=300))
                 self.lib = [Track.from_item(t) for t in data.get("tracks", [])
                             if t.get("videoId")]
                 self.say(f"{len(self.lib)} liked songs")
@@ -891,7 +919,11 @@ class App:
 
         def work():
             try:
-                items = self.yt.get_library_playlists(limit=50)
+                items = self._lib_call(
+                    lambda: self.yt.get_library_playlists(limit=50))
+                if not items and self._auth_refresh():
+                    # signed-out responses come back empty, not as errors
+                    items = self.yt.get_library_playlists(limit=50)
                 self.playlists = [
                     Playlist(p["playlistId"], p.get("title", "?"),
                              str(p.get("count", "")))
@@ -908,7 +940,8 @@ class App:
 
         def work():
             try:
-                data = self.yt.get_playlist(pl.playlist_id, limit=300)
+                data = self._lib_call(
+                    lambda: self.yt.get_playlist(pl.playlist_id, limit=300))
                 self.pl_tracks = [Track.from_item(t)
                                   for t in data.get("tracks", [])
                                   if t and t.get("videoId")]
