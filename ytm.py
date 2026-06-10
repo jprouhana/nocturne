@@ -44,7 +44,7 @@ STATE_FILE = os.path.join(CONFIG_DIR, "state.json")
 UA = ("Mozilla/5.0 (X11; Linux x86_64; rv:151.0) "
       "Gecko/20100101 Firefox/151.0")
 
-# palette
+# palette — RED/ORANGE/PINK are theme slots, swapped by set_theme()
 RED = (255, 0, 51)
 PINK = (255, 94, 125)
 ORANGE = (255, 138, 41)
@@ -53,6 +53,21 @@ GREY = (130, 130, 142)
 DGREY = (70, 70, 80)
 DARK = (24, 24, 30)
 GREEN = (108, 222, 130)
+
+# name, primary, secondary, accent
+THEMES = [
+    ("ytm",       (255, 0, 51),    (255, 138, 41),  (255, 94, 125)),
+    ("synthwave", (255, 56, 222),  (110, 80, 255),  (0, 229, 255)),
+    ("matrix",    (0, 210, 70),    (110, 255, 130), (200, 255, 210)),
+    ("ocean",     (0, 130, 255),   (0, 215, 215),   (160, 235, 255)),
+    ("sunset",    (255, 80, 0),    (255, 195, 40),  (255, 120, 145)),
+    ("ice",       (120, 165, 255), (195, 220, 255), (245, 250, 255)),
+]
+
+
+def set_theme(i):
+    global RED, ORANGE, PINK
+    _, RED, ORANGE, PINK = THEMES[i % len(THEMES)]
 
 RESET = "\x1b[0m"
 BOLD = "\x1b[1m"
@@ -574,7 +589,13 @@ def verify_auth():
 
 TABS = ["Search", "Library", "Playlists", "Queue"]
 BLOCKS = " ▁▂▃▄▅▆▇█"
-VIZ_STYLES = ["bars", "mirror", "scope", "bands"]
+VIZ_STYLES = ["bars", "mirror", "scope", "bands", "drop"]
+BADGE = ["█▙  ", "███▙", "█▛  "]
+LOGO = [
+    "█▖ ▗█ ▀▀█▀▀   █▀▄▀█ █   █ ▗█▀▀▀ ▀█▀ ▗█▀▀",
+    "▝█▄█▘   █     █ ▀ █ █   █ ▝▀▀█▖  █  ▐▌  ",
+    "  █     █     █   █ ▜▄▄▄▛ ▄▄▄█▘ ▄█▄ ▝█▄▄",
+]
 # braille dot bits, [x][y] within a 2×4 cell
 BRAILLE = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]]
 
@@ -613,6 +634,14 @@ class App:
         self.viz_style = state.get("viz", "bars")
         if self.viz_style not in VIZ_STYLES:
             self.viz_style = "bars"
+        names = [t[0] for t in THEMES]
+        self.theme_i = names.index(state["theme"]) \
+            if state.get("theme") in names else 0
+        set_theme(self.theme_i)
+        self._drop_t = 0.0
+        self._drop_last = time.time()
+        self._drop_e = [0.0, 0.0, 0.0]   # smoothed bass/mid/treble
+        self._drop_lut_cache = None
         self.liked_now = False
         self.input_mode = False
         self.input_buf = ""
@@ -642,7 +671,8 @@ class App:
             with open(STATE_FILE, "w") as f:
                 json.dump({"volume": self.player.props.get("volume", 70),
                            "repeat": self.repeat, "work": self.work,
-                           "viz": self.viz_style}, f)
+                           "viz": self.viz_style,
+                           "theme": THEMES[self.theme_i][0]}, f)
         except Exception:
             pass
 
@@ -929,6 +959,11 @@ class App:
             self.work = not self.work
             self.say("work mode — art hidden" if self.work
                      else "work mode off")
+        elif k == "C":
+            self.theme_i = (self.theme_i + 1) % len(THEMES)
+            set_theme(self.theme_i)
+            self._drop_lut_cache = None
+            self.say(f"theme: {THEMES[self.theme_i][0]}")
         elif k == "\t":
             self.tab = (self.tab + 1) % len(TABS)
         elif k == "SHIFT-TAB":
@@ -979,9 +1014,6 @@ class App:
         sys.stdout.flush()
 
     def _render_header(self, w):
-        logo1 = "█▄█ ▀█▀   █▀▄▀█ █ █ █▀▀ █ █▀▀"
-        logo2 = " █   █    █ ▀ █ █▄█ ▄▄█ █ █▄▄"
-        badge = fg(RED) + "▶ " + RESET
         acct = (fg(GREEN) + "● signed in" if self.authed
                 else fg(GREY) + "○ guest — run: ytm --auth-firefox")
         if self.work:
@@ -994,13 +1026,20 @@ class App:
                 tabs.append(fg(GREY) + f" {i+1} {t} " + RESET)
         tab_bar = (fg(DGREY) + "·" + RESET).join(tabs)
 
-        l1 = "  " + badge + grad_text(logo1, RED, ORANGE)
-        l2 = "    " + grad_text(logo2, PINK, RED)
-        pad1 = w - visible_len(l1) - visible_len(acct) - 2
-        l1 += " " * max(pad1, 1) + acct + " "
-        l3 = "  " + tab_bar
-        rule = fg(DGREY) + "─" * w + RESET
-        return [crop_pad(l1, w), crop_pad(l2, w), crop_pad(l3, w), rule]
+        lines = []
+        for r, row in enumerate(LOGO):
+            # gradient drifts down-left as it descends the rows
+            cl = lerp(RED, PINK, r / 2)
+            cr = lerp(ORANGE, RED, r / 2)
+            ln = ("  " + fg(lerp(RED, DARK, r * 0.18)) + BADGE[r] + RESET +
+                  "  " + grad_text(row, cl, cr))
+            if r == 0:
+                pad = w - visible_len(ln) - visible_len(acct) - 2
+                ln += " " * max(pad, 1) + acct + " "
+            lines.append(crop_pad(ln, w))
+        lines.append(crop_pad("  " + tab_bar, w))
+        lines.append(fg(DGREY) + "─" * w + RESET)
+        return lines
 
     def _render_list(self, w, h):
         lst = self.current_list()
@@ -1065,7 +1104,7 @@ class App:
                 line += " " * max(pad, 1) + fg(DGREY) + dur + RESET
             if is_sel:
                 plain = ANSI_RE.sub("", line)
-                line = bg((48, 16, 24)) + fg(WHITE) + BOLD + crop_pad(
+                line = bg(lerp(DARK, RED, 0.18)) + fg(WHITE) + BOLD + crop_pad(
                     " " + fg(RED) + "▌" + fg(WHITE) + plain[1:], w)
             out.append(crop_pad(line, w))
         return out
@@ -1157,6 +1196,8 @@ class App:
             return self._viz_scope(w, rows, n, pad_l)
         if self.viz_style == "bands":
             return self._viz_bands(w, rows, n, pad_l)
+        if self.viz_style == "drop":
+            return self._viz_drop(w, rows, n, pad_l)
 
         if self.viz_style == "mirror":
             m = n // 2 + 1
@@ -1220,6 +1261,71 @@ class App:
             lines.append(crop_pad(" " * pad_l + "".join(cells) + RESET, w))
         return lines
 
+    def _drop_lut(self):
+        """64-entry palette: dark → primary → secondary → accent → white."""
+        if self._drop_lut_cache is None:
+            import numpy as np
+            stops = [DARK, lerp(DARK, RED, 0.6), RED, ORANGE, PINK,
+                     lerp(PINK, WHITE, 0.7)]
+            lut = []
+            for i in range(64):
+                t = i / 63 * (len(stops) - 1)
+                a = min(int(t), len(stops) - 2)
+                lut.append(lerp(stops[a], stops[a + 1], t - a))
+            self._drop_lut_cache = np.array(lut, dtype=float)
+        return self._drop_lut_cache
+
+    def _viz_drop(self, w, rows, n, pad_l):
+        """Milkdrop-ish plasma: interference field warped by bass/mid/treble,
+        rendered as half-block pixels."""
+        import numpy as np
+        W = max(w - 4, 20)
+        H = rows * 2
+        pad = (w - W) // 2
+
+        if self.tap and self.tap.alive:
+            lv = self.tap.levels(18)
+            raw = (sum(lv[:5]) / 5, sum(lv[5:12]) / 7, sum(lv[12:]) / 6)
+        elif bool(self.player.props.get("pause")) or self.player.loading:
+            raw = (0.0, 0.0, 0.0)
+        else:
+            t0 = time.time()
+            raw = (0.4 + 0.3 * math.sin(t0 * 1.9),
+                   0.4 + 0.3 * math.sin(t0 * 1.3 + 2),
+                   0.3 + 0.2 * math.sin(t0 * 2.7 + 4))
+        for i, x in enumerate(raw):
+            e = self._drop_e[i]
+            self._drop_e[i] = e + (x - e) * (0.5 if x > e else 0.12)
+        eb, em, et = self._drop_e
+
+        now = time.time()
+        dt = min(now - self._drop_last, 0.25)
+        self._drop_last = now
+        self._drop_t += dt * (0.5 + 2.2 * em + 1.5 * eb)
+        t = self._drop_t
+
+        ys = np.linspace(-1, 1, H)[:, None]
+        xs = np.linspace(-1.6, 1.6, W)[None, :]
+        r = np.sqrt(xs * xs + ys * ys) + 1e-6
+        ang = np.arctan2(ys, xs)
+        v = (np.sin(r * (5.0 + 9.0 * eb) - t * 2.0)        # bass: pulse rings
+             + np.sin(xs * (2.5 + 4.0 * et) + t)           # treble: ripple
+             + np.sin(ys * 3.0 - t * 0.8)
+             + np.sin(ang * 3.0 + t * (0.4 + 1.6 * em)))   # mid: swirl
+        v = (v + 4.0) / 8.0
+        bright = 0.30 + 0.70 * min(1.0, (eb + em + et) * 0.8)
+        idx = np.clip((v * 63).astype(int), 0, 63)
+        rgb = np.clip(self._drop_lut()[idx] * bright, 0, 255).astype(int)
+
+        lines = []
+        for row in range(rows):
+            top, bot = rgb[row * 2], rgb[row * 2 + 1]
+            cells = [f"\x1b[38;2;{tp[0]};{tp[1]};{tp[2]}m"
+                     f"\x1b[48;2;{bt[0]};{bt[1]};{bt[2]}m▀"
+                     for tp, bt in zip(top, bot)]
+            lines.append(crop_pad(" " * pad + "".join(cells) + RESET, w))
+        return lines
+
     def _viz_bands(self, w, rows, n, pad_l):
         """Centered horizontal bars, one frequency band per row, bass low."""
         self._viz_physics(self._viz_targets(rows))
@@ -1278,7 +1384,7 @@ class App:
             return crop_pad("  " + fg(ORANGE) + self.status + RESET, w)
         keys = [("/", "find"), ("↵", "play"), ("spc", "pause"),
                 ("n/b", "skip"), ("q", "quit"), ("v", "viz"),
-                ("w", "work"), ("a", "+queue"), ("L", "like"),
+                ("C", "theme"), ("w", "work"), ("a", "+queue"), ("L", "like"),
                 (",/.", "seek"), ("±", "vol"), ("s", "shuf"),
                 ("r", "rep"), ("tab", "view")]
         # add hints while they fit, most important first
