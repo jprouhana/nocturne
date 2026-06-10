@@ -57,6 +57,8 @@ guest mode.
 | `enter` | play | `n` / `b` | next / prev |
 | `j` `k` / arrows | move | `,` / `.` | seek 10s |
 | `a` | add to queue | `+` / `-` | volume |
+| `A` | add track to a playlist | `N` | new playlist |
+| `x` | remove (queue/liked/playlist) | `D``D` | delete playlist |
 | `L` | like song | `m` | mute |
 | `s` | shuffle queue | `r` | repeat |
 | `v` | cycle visualizer | `c` | cycle color theme |

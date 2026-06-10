@@ -147,6 +147,7 @@ class Track:
     album: str = ""
     duration: str = ""
     thumb: str = ""
+    set_video_id: str = ""   # playlist membership id, needed for removal
 
     @classmethod
     def from_item(cls, it):
@@ -162,7 +163,8 @@ class Track:
         if isinstance(thumbs, dict):
             thumbs = thumbs.get("thumbnails", [])
         thumb = thumbs[-1]["url"] if thumbs else ""
-        return cls(vid, title, artist, album, dur, thumb)
+        return cls(vid, title, artist, album, dur, thumb,
+                   it.get("setVideoId") or "")
 
 
 @dataclass
@@ -756,6 +758,11 @@ class App:
         self.liked_now = False
         self.input_mode = False
         self.input_buf = ""
+        self.input_purpose = "search"
+        self.picker = None            # playlist-picker modal state
+        self.picker_sel = 0
+        self.picker_track = None
+        self._confirm_del = ("", 0.0)
         self.status = ""
         self.status_t = 0.0
         self.searching = False
@@ -981,6 +988,119 @@ class App:
                 self.say(f"like failed: {e}")
         threading.Thread(target=work, daemon=True).start()
 
+    # ── library write ops ────────────────────────────────────────────────────
+    def create_playlist(self, name):
+        def work():
+            try:
+                self.yt.create_playlist(name, "", "PRIVATE")
+                self.say(f"✚ playlist created: {name}")
+                self._pls_fetched = False
+                self.fetch_playlists()
+            except Exception as e:
+                self.say(f"create failed: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def open_picker(self):
+        """A = add the selected track to one of your playlists."""
+        if not self.authed:
+            self.say("playlists need sign-in → ytm --login")
+            return
+        lst = self.current_list()
+        i = self.sel[self.tab]
+        in_tracks = self.tab in (0, 1, 3) or (self.tab == 2 and self.pl_open)
+        if not (in_tracks and lst and 0 <= i < len(lst)):
+            return
+        if not self.playlists:
+            self.fetch_playlists()
+            self.say("loading playlists — press A again in a second")
+            return
+        self.full = False
+        self.picker = self.playlists
+        self.picker_sel = 0
+        self.picker_track = lst[i]
+
+    def add_to_playlist(self, pl, track):
+        def work():
+            try:
+                if pl.playlist_id == "LM":      # Liked Music is rate-based
+                    self.yt.rate_song(track.video_id, "LIKE")
+                else:
+                    self.yt.add_playlist_items(pl.playlist_id,
+                                               [track.video_id])
+                self.say(f"✚ {track.title} → {pl.title}")
+            except Exception as e:
+                self.say(f"add failed: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def unlike_at(self, i):
+        """x in Library = remove from liked songs."""
+        if not (0 <= i < len(self.lib)):
+            return
+        track = self.lib[i]
+
+        def work():
+            try:
+                self.yt.rate_song(track.video_id, "INDIFFERENT")
+                if track in self.lib:
+                    self.lib.remove(track)
+                self.sel[1] = min(self.sel[1], max(len(self.lib) - 1, 0))
+                self.say(f"♡ unliked: {track.title}")
+            except Exception as e:
+                self.say(f"unlike failed: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def remove_from_playlist(self, i):
+        """x inside an open playlist = remove that track from it."""
+        if not (self.pl_open and 0 <= i < len(self.pl_tracks)):
+            return
+        track = self.pl_tracks[i]
+        if not track.set_video_id:
+            self.say("can't remove this one (not an editable playlist item)")
+            return
+        pl = self.pl_open
+
+        def work():
+            try:
+                self.yt.remove_playlist_items(
+                    pl.playlist_id,
+                    [{"videoId": track.video_id,
+                      "setVideoId": track.set_video_id}])
+                if track in self.pl_tracks:
+                    self.pl_tracks.remove(track)
+                self.sel[2] = min(self.sel[2],
+                                  max(len(self.pl_tracks) - 1, 0))
+                self.say(f"✗ removed from {pl.title}: {track.title}")
+            except Exception as e:
+                self.say(f"remove failed: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def delete_playlist(self, pl):
+        """D twice on a playlist deletes it (with a confirm window)."""
+        if not self.authed:
+            self.say("playlists need sign-in → ytm --login")
+            return
+        if pl.playlist_id == "LM":
+            self.say("can't delete Liked Music")
+            return
+        name, t0 = self._confirm_del
+        if name == pl.playlist_id and time.time() - t0 < 3:
+            self._confirm_del = ("", 0.0)
+
+            def work():
+                try:
+                    self.yt.delete_playlist(pl.playlist_id)
+                    self.playlists = [p for p in self.playlists
+                                      if p.playlist_id != pl.playlist_id]
+                    self.sel[2] = min(self.sel[2],
+                                      max(len(self.playlists) - 1, 0))
+                    self.say(f"✗ deleted playlist: {pl.title}")
+                except Exception as e:
+                    self.say(f"delete failed: {e}")
+            threading.Thread(target=work, daemon=True).start()
+        else:
+            self._confirm_del = (pl.playlist_id, time.time())
+            self.say(f"press D again to delete “{pl.title}”")
+
     def shuffle_queue(self):
         if len(self.queue) <= 1:
             return
@@ -1014,14 +1134,31 @@ class App:
                 self.input_buf = ""
             elif k in ("\r", "\n"):
                 self.input_mode = False
-                if self.input_buf.strip():
+                text = self.input_buf.strip()
+                if text and self.input_purpose == "search":
                     self.tab = 0
-                    self.do_search(self.input_buf.strip())
+                    self.do_search(text)
+                elif text and self.input_purpose == "newpl":
+                    self.create_playlist(text)
                 self.input_buf = ""
             elif k in ("\x7f", "\x08"):
                 self.input_buf = self.input_buf[:-1]
             elif k and len(k) == 1 and k.isprintable():
                 self.input_buf += k
+            return
+
+        if self.picker is not None:
+            if k == "ESC":
+                self.picker = None
+            elif k in ("UP", "k"):
+                self.picker_sel = max(0, self.picker_sel - 1)
+            elif k in ("DOWN", "j"):
+                self.picker_sel = min(len(self.picker) - 1,
+                                      self.picker_sel + 1)
+            elif k in ("\r", "\n"):
+                self.add_to_playlist(self.picker[self.picker_sel],
+                                     self.picker_track)
+                self.picker = None
             return
 
         lst = self.current_list()
@@ -1030,7 +1167,20 @@ class App:
         elif k == "/":
             self.full = False          # can't see the search box otherwise
             self.input_mode = True
+            self.input_purpose = "search"
             self.input_buf = ""
+        elif k == "N":
+            if not self.authed:
+                self.say("playlists need sign-in → ytm --login")
+            else:
+                self.full = False
+                self.input_mode = True
+                self.input_purpose = "newpl"
+                self.input_buf = ""
+        elif k == "A":
+            self.open_picker()
+        elif k == "D" and self.tab == 2 and not self.pl_open and lst:
+            self.delete_playlist(lst[self.sel[2]])
         elif k in ("UP", "k"):
             self.sel[self.tab] = max(0, self.sel[self.tab] - 1)
         elif k in ("DOWN", "j"):
@@ -1099,6 +1249,10 @@ class App:
                 if i < self.qpos:
                     self.qpos -= 1
                 self.sel[3] = min(self.sel[3], max(len(self.queue) - 1, 0))
+        elif k == "x" and self.tab == 1 and lst:
+            self.unlike_at(self.sel[1])
+        elif k == "x" and self.tab == 2 and self.pl_open and lst:
+            self.remove_from_playlist(self.sel[2])
 
         if self.tab == 1:
             self.fetch_library()
@@ -1174,7 +1328,36 @@ class App:
         lines.append(fg(DGREY) + "─" * w + RESET)
         return lines
 
+    def _render_picker(self, w, h):
+        """Modal: pick a playlist to add the chosen track to."""
+        out = []
+        out.append(crop_pad(
+            "  " + BOLD + fg(WHITE) + "add to playlist" + RESET +
+            fg(GREY) + f"  ({self.picker_track.title})" + RESET, w))
+        out.append(crop_pad("  " + fg(DGREY) + ITAL +
+                            "↵ add · esc cancel" + RESET, w))
+        out.append(crop_pad("", w))
+        rows = h - len(out)
+        scr = max(0, self.picker_sel - rows + 1)
+        for r in range(rows):
+            i = scr + r
+            if i >= len(self.picker):
+                out.append(crop_pad("", w))
+                continue
+            pl = self.picker[i]
+            mark = "♥ " if pl.playlist_id == "LM" else "▤ "
+            line = (f"   {fg(ORANGE)}{mark}{RESET}{fg(WHITE)}{pl.title}"
+                    f"{RESET} {fg(GREY)}{DIM}{pl.count}{RESET}")
+            if i == self.picker_sel:
+                plain = ANSI_RE.sub("", line)
+                line = bg(lerp(DARK, RED, 0.18)) + fg(WHITE) + BOLD + \
+                    crop_pad(" " + fg(RED) + "▌" + fg(WHITE) + plain[1:], w)
+            out.append(crop_pad(line, w))
+        return out
+
     def _render_list(self, w, h):
+        if self.picker is not None:
+            return self._render_picker(w, h)
         lst = self.current_list()
         title = TABS[self.tab]
         if self.tab == 2 and self.pl_open:
@@ -1187,7 +1370,9 @@ class App:
         out.append(crop_pad("", w))
 
         if self.input_mode:
-            box = ("  " + fg(RED) + "search ❯ " + RESET + fg(WHITE) +
+            label = ("search ❯ " if self.input_purpose == "search"
+                     else "new playlist ❯ ")
+            box = ("  " + fg(RED) + label + RESET + fg(WHITE) +
                    self.input_buf + bg(RED) + " " + RESET)
             out.append(crop_pad(box, w))
             out.append(crop_pad("", w))
@@ -1721,7 +1906,8 @@ class App:
             keys = [("/", "find"), ("↵", "play"), ("spc", "pause"),
                     ("n/b", "skip"), ("q", "quit"), ("f", "full"),
                     ("v", "viz"), ("c", "theme"), ("w", "work"),
-                    ("a", "+queue"), ("L", "like"), (",/.", "seek"),
+                    ("a", "+queue"), ("A", "→playlist"), ("N", "new pl"),
+                    ("x", "remove"), ("L", "like"), (",/.", "seek"),
                     ("±", "vol"), ("s", "shuf"), ("r", "rep"),
                     ("tab", "view")]
         # add hints while they fit, most important first
