@@ -5,9 +5,16 @@ talks to your account, and the visualizer is a real FFT of whatever is coming
 out of your speakers (it taps the PipeWire monitor with parec, so it reacts to
 the actual audio, not a fake animation).
 
+![ytm](assets/screenshot.png)
+
 Album art gets rendered as truecolor half-blocks, search results start a radio
 so the music keeps going, and your library/playlists/likes work once you're
 signed in. Works fine without an account too, you just lose the library stuff.
+
+The `drop` visualizer is a milkdrop-style plasma — twenty field equations that
+morph and crossfade to the beat, driven by the real audio spectrum:
+
+![drop visualizer](assets/visualizer.gif)
 
 ## install
 
