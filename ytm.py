@@ -936,6 +936,17 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     # ── playback ─────────────────────────────────────────────────────────────
+    def _write_now(self):
+        """Drop now-playing info where widgets/scripts can read it."""
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            with open(os.path.join(CONFIG_DIR, "now.txt"), "w") as f:
+                if self.now:
+                    f.write(f"{self.now.title}\n{self.now.artist}\n"
+                            f"{self.now.album}\n")
+        except Exception:
+            pass
+
     def play_queue(self, idx):
         if not (0 <= idx < len(self.queue)):
             return
@@ -943,6 +954,7 @@ class App:
         self.now = self.queue[idx]
         self.liked_now = False
         self.player.play_video(self.now.video_id)
+        self._write_now()
         self.say(f"▶ {self.now.title}")
 
     def next_track(self):
@@ -952,6 +964,7 @@ class App:
             self.play_queue(0)
         else:
             self.now = None
+            self._write_now()
             self.player.stop()
 
     def prev_track(self):
@@ -1551,8 +1564,11 @@ class App:
         return lines
 
     def _render_visualizer_now(self, w, rows):
-        n = max(w - 10, 16)
-        pad_l = (w - n) // 2
+        if getattr(self, "eww_flush", False):
+            n, pad_l = w, 0          # eww frames: fill border to border
+        else:
+            n = max(w - 10, 16)
+            pad_l = (w - n) // 2
         if self.viz_style == "scope":
             return self._viz_scope(w, rows, n, pad_l)
         if self.viz_style == "bands":
@@ -1783,7 +1799,7 @@ class App:
         """Milkdrop-ish plasma: interference field warped by bass/mid/treble,
         rendered as half-block pixels."""
         import numpy as np
-        W = max(w - 4, 20)
+        W = w if getattr(self, "eww_flush", False) else max(w - 4, 20)
         H = rows * 2
         Wpx = W * 2 if self.drop_hd else W   # hi-def: 2×2 px per cell
         pad = (w - W) // 2
@@ -2001,6 +2017,8 @@ class App:
             sys.stdout.write("\x1b[?25h\x1b[?1049l")
             sys.stdout.flush()
             self._save_state()
+            self.now = None
+            self._write_now()
             self.tap.stop()
             self.player.quit()
 
@@ -2080,6 +2098,7 @@ def eww_stream(spec, style, fps, theme_name, frame_title=None):
     v.N_PRESETS = App.N_PRESETS
     v.viz_style = style
     v.drop_hd = True
+    v.eww_flush = True
     v.bars, v.peaks = [], []
     v._phys_t = time.time()
     v.player = types.SimpleNamespace(props={}, loading=False)
