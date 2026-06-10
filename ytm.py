@@ -670,6 +670,7 @@ class App:
             if state.get("theme") in names else 0
         set_theme(self.theme_i)
         self._drop_t = 0.0
+        self._viz_cache = None
         self._phys_t = time.time()
         self._drop_last = time.time()
         self._drop_e = [0.0, 0.0, 0.0]   # smoothed bass/mid/treble
@@ -1255,6 +1256,19 @@ class App:
             self.peaks[i] = max(self.peaks[i] - pfall, self.bars[i])
 
     def _render_visualizer(self, w, rows):
+        # the UI ticks ~25fps while playing, but discrete styles look
+        # steadier updating at ~12 — serve a cached frame in between
+        if self.viz_style != "drop":
+            c = self._viz_cache
+            if c and c[1:4] == (self.viz_style, w, rows) and \
+                    time.time() - c[0] < 0.075:
+                return c[4]
+        lines = self._render_visualizer_now(w, rows)
+        if self.viz_style != "drop":
+            self._viz_cache = (time.time(), self.viz_style, w, rows, lines)
+        return lines
+
+    def _render_visualizer_now(self, w, rows):
         n = max(w - 10, 16)
         pad_l = (w - n) // 2
         if self.viz_style == "scope":
@@ -1555,12 +1569,13 @@ class App:
                 if self.eof_flag.is_set():
                     self.eof_flag.clear()
                     self.next_track()
-                # drop is a flowing field and wants ~30 fps; the discrete
-                # styles look steadier at ~12, idle screen even lazier
+                # drop flows at ~30 fps; other styles tick the UI at ~25
+                # (smooth progress bar) with the visualizer itself cached
+                # down to ~12; idle screen is lazier
                 if self.now and self.viz_style == "drop":
                     tick = 0.03
                 elif self.now or self.input_mode:
-                    tick = 0.08
+                    tick = 0.04
                 else:
                     tick = 0.12
                 k = self.read_key(tick)
