@@ -298,7 +298,7 @@ class SpectrumTap:
     """
 
     RATE = 44100
-    CHUNK = 1024  # ~23 ms per FFT frame (~43 updates/sec)
+    CHUNK = 2048  # ~46 ms per FFT frame — steadier spectrum for the bars
 
     def __init__(self, source_cmd=None):
         self.alive = False
@@ -1555,9 +1555,14 @@ class App:
                 if self.eof_flag.is_set():
                     self.eof_flag.clear()
                     self.next_track()
-                # ~33 fps while something is on screen worth animating,
-                # lazy ~12 fps when idle
-                tick = 0.03 if (self.now or self.input_mode) else 0.08
+                # drop is a flowing field and wants ~30 fps; the discrete
+                # styles look steadier at ~12, idle screen even lazier
+                if self.now and self.viz_style == "drop":
+                    tick = 0.03
+                elif self.now or self.input_mode:
+                    tick = 0.08
+                else:
+                    tick = 0.12
                 k = self.read_key(tick)
                 if k:
                     self.handle_key(k)
