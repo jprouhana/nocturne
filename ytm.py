@@ -7,6 +7,7 @@ True-color half-block album art, animated visualizer, gradient UI.
 Usage:
   ytm                 launch the TUI
   ytm --auth          sign in by pasting request headers from music.youtube.com
+  ytm --login         interactive sign-in wizard (pick your browser)
   ytm --auth-firefox  import your session from Firefox's cookie store
   ytm --doctor        check that all dependencies are healthy
 """
@@ -516,39 +517,103 @@ def import_firefox_auth():
         except Exception as e:
             print(f"  (skipping {db}: {e})")
             continue
-        sapisid = cookies.get("SAPISID") or cookies.get("__Secure-3PAPISID")
-        if not sapisid:
-            continue
-        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
-        # ytmusicapi requires a SAPISIDHASH authorization header to detect
-        # browser auth (it re-derives a fresh one per request)
-        import hashlib
-        origin = "https://music.youtube.com"
-        ts = str(int(time.time()))
-        sha = hashlib.sha1(f"{ts} {sapisid} {origin}".encode()).hexdigest()
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        headers = {
-            "user-agent": UA,
-            "accept": "*/*",
-            "accept-language": "en-US,en;q=0.5",
-            "content-type": "application/json",
-            "x-goog-authuser": "0",
-            "x-origin": origin,
-            "origin": origin,
-            "authorization": f"SAPISIDHASH {ts}_{sha}",
-            "cookie": cookie_str,
-        }
-        with open(AUTH_FILE, "w") as f:
-            json.dump(headers, f, indent=2)
-        os.chmod(AUTH_FILE, 0o600)
-        if verify_auth():
+        if write_auth_from_cookies(cookies):
             print(f"✓ signed in — session imported from {db}")
             return True
-        os.unlink(AUTH_FILE)
         print(f"  (cookies in {db} didn't authenticate, trying next profile)")
     print("✗ found Firefox profiles, but none had a valid YouTube Music login.")
     print("  Log in at https://music.youtube.com and retry.")
     return False
+
+
+def write_auth_from_cookies(cookies):
+    """Build browser.json from a {name: value} cookie dict and verify it."""
+    sapisid = cookies.get("SAPISID") or cookies.get("__Secure-3PAPISID")
+    if not sapisid:
+        return False
+    cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    # ytmusicapi requires a SAPISIDHASH authorization header to detect
+    # browser auth (it re-derives a fresh one per request)
+    import hashlib
+    origin = "https://music.youtube.com"
+    ts = str(int(time.time()))
+    sha = hashlib.sha1(f"{ts} {sapisid} {origin}".encode()).hexdigest()
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    headers = {
+        "user-agent": UA,
+        "accept": "*/*",
+        "accept-language": "en-US,en;q=0.5",
+        "content-type": "application/json",
+        "x-goog-authuser": "0",
+        "x-origin": origin,
+        "origin": origin,
+        "authorization": f"SAPISIDHASH {ts}_{sha}",
+        "cookie": cookie_str,
+    }
+    with open(AUTH_FILE, "w") as f:
+        json.dump(headers, f, indent=2)
+    os.chmod(AUTH_FILE, 0o600)
+    if verify_auth():
+        return True
+    os.unlink(AUTH_FILE)
+    return False
+
+
+def import_browser_auth(browser):
+    """Pull the YT Music session from any browser yt-dlp can read
+    (handles Chromium keyring decryption too)."""
+    try:
+        from yt_dlp.cookies import extract_cookies_from_browser
+    except ImportError:
+        print("✗ yt-dlp python module missing — pip install yt-dlp")
+        return False
+    try:
+        jar = extract_cookies_from_browser(browser)
+    except Exception as e:
+        print(f"✗ couldn't read {browser} cookies: {e}")
+        return False
+    cookies = {c.name: c.value for c in jar
+               if c.domain in (".youtube.com", "music.youtube.com",
+                               ".music.youtube.com")
+               and not c.name.startswith("ST-")}
+    if write_auth_from_cookies(cookies):
+        print(f"✓ signed in — session imported from {browser}")
+        return True
+    print(f"✗ {browser} had no valid YouTube Music login.")
+    print("  Log in at https://music.youtube.com there and retry.")
+    return False
+
+
+def login_wizard():
+    print()
+    print("  ── sign in to YouTube Music ─────────────────────────")
+    print()
+    print("  Make sure you're logged in at https://music.youtube.com")
+    print("  in your browser, then pick it:")
+    print()
+    browsers = ["firefox", "chrome", "chromium", "brave",
+                "edge", "vivaldi", "opera"]
+    for i, b in enumerate(browsers, 1):
+        print(f"    {i}) {b}")
+    print(f"    {len(browsers) + 1}) paste request headers manually")
+    print()
+    try:
+        choice = input("  choice: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if not choice.isdigit() or not 1 <= int(choice) <= len(browsers) + 1:
+        print("  ✗ not a valid choice")
+        return False
+    n = int(choice)
+    if n == len(browsers) + 1:
+        return paste_headers_auth()
+    browser = browsers[n - 1]
+    ok = (import_firefox_auth() if browser == "firefox"
+          else import_browser_auth(browser))
+    if ok:
+        print("  You're all set — run: ytm")
+    return ok
 
 
 def paste_headers_auth():
@@ -771,7 +836,7 @@ class App:
             return
         self._lib_fetched = True
         if not self.authed:
-            self.say("library needs sign-in → quit and run: ytm --auth-firefox")
+            self.say("library needs sign-in → quit and run: ytm --login")
             return
         self.loading_msg = "loading liked songs…"
 
@@ -793,7 +858,7 @@ class App:
             return
         self._pls_fetched = True
         if not self.authed:
-            self.say("playlists need sign-in → quit and run: ytm --auth-firefox")
+            self.say("playlists need sign-in → quit and run: ytm --login")
             return
         self.loading_msg = "loading playlists…"
 
@@ -904,7 +969,7 @@ class App:
         if not self.now:
             return
         if not self.authed:
-            self.say("liking needs sign-in → ytm --auth-firefox")
+            self.say("liking needs sign-in → ytm --login")
             return
 
         def work():
@@ -1072,7 +1137,7 @@ class App:
 
     def _render_header(self, w):
         acct = (fg(GREEN) + "● signed in" if self.authed
-                else fg(GREY) + "○ guest — run: ytm --auth-firefox")
+                else fg(GREY) + "○ guest — run: ytm --login")
         if self.work:
             acct = fg(GREY) + "▪ work  " + acct
         tabs = []
@@ -1733,24 +1798,38 @@ def doctor():
 
 def main():
     ap = argparse.ArgumentParser(prog="ytm", description=__doc__)
+    ap.add_argument("--login", "--setup", action="store_true", dest="login",
+                    help="interactive sign-in wizard (pick your browser)")
     ap.add_argument("--auth", action="store_true",
                     help="sign in by pasting browser request headers")
     ap.add_argument("--auth-firefox", action="store_true",
                     help="import session from Firefox cookies")
+    ap.add_argument("--auth-browser", metavar="NAME",
+                    help="import session from a browser non-interactively "
+                         "(chrome, brave, edge, chromium, vivaldi, opera)")
     ap.add_argument("--doctor", action="store_true", help="check dependencies")
     ap.add_argument("--ao", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.doctor:
         sys.exit(0 if doctor() else 1)
+    if args.login:
+        sys.exit(0 if login_wizard() else 1)
     if args.auth:
         sys.exit(0 if paste_headers_auth() else 1)
     if args.auth_firefox:
         sys.exit(0 if import_firefox_auth() else 1)
+    if args.auth_browser:
+        sys.exit(0 if import_browser_auth(args.auth_browser) else 1)
 
     if not sys.stdin.isatty():
         print("ytm needs a TTY. Run it in a terminal.")
         sys.exit(1)
+    if not os.path.isfile(AUTH_FILE) and sys.stdout.isatty():
+        print("  no account linked yet — search and playback still work.")
+        print("  to get your library/likes/playlists:  ytm --login")
+        print("  starting in guest mode in 3s…")
+        time.sleep(3)
     App(ao=args.ao).run()
 
 

@@ -22,32 +22,30 @@ Then:
 ```sh
 git clone https://github.com/jprouhana/ytm-tui
 cd ytm-tui
-python -m venv .venv
-.venv/bin/pip install ytmusicapi pillow numpy
+./install.sh
 ```
 
-I keep a little launcher at `~/.local/bin/ytm`:
-
-```sh
-#!/bin/sh
-exec "$HOME/ytm-tui/.venv/bin/python" "$HOME/ytm-tui/ytm.py" "$@"
-```
+That sets up a venv, drops a `ytm` launcher into `~/.local/bin`, and offers
+to sign you in.
 
 ## signing in
 
-If you use Firefox, log in to music.youtube.com and run
-
 ```sh
-ytm --auth-firefox
+ytm --login
 ```
 
-and it pulls the session straight out of your cookie store (handles the XDG
-profile path and the sqlite WAL, which is where fresh logins hide).
+Pick the browser you're logged into music.youtube.com with and it lifts the
+session out of its cookie store — firefox, chrome, chromium, brave, edge,
+vivaldi and opera all work (the chromium-family cookie decryption is handled
+by yt-dlp, keyring and all).
 
-Any other browser: `ytm --auth`, then paste the request headers from a
-network request on music.youtube.com (F12 → Network → filter "browse" →
-copy request headers). Auth lands in `~/.config/ytm-tui/browser.json`,
-chmod 600, never leaves your machine.
+If that somehow fails there's a manual fallback: `ytm --auth`, then paste
+the request headers from any network request on music.youtube.com
+(F12 → Network → filter "browse" → copy request headers).
+
+Auth lands in `~/.config/ytm-tui/browser.json`, chmod 600, and never leaves
+your machine. Skipping sign-in is fine too — search and playback work in
+guest mode.
 
 `ytm --doctor` checks that everything is wired up.
 
@@ -61,16 +59,20 @@ chmod 600, never leaves your machine.
 | `a` | add to queue | `+` / `-` | volume |
 | `L` | like song | `m` | mute |
 | `s` | shuffle queue | `r` | repeat |
-| `v` | cycle visualizer | `C` | cycle color theme |
+| `v` | cycle visualizer | `c` | cycle color theme |
 | `w` | work mode (no art) | `f` | fullscreen |
-| `1`-`4` / `tab` | switch view | `x` | drop from queue |
-| `esc` / `h` | back out of playlist | `q` | quit |
+| `p` | hi-def plasma pixels | `x` | drop from queue |
+| `1`-`4` / `tab` | switch view | `esc` / `h` | back out of playlist |
+| `q` | quit | | |
 
 ## notes
 
 - the spectrum is 45 Hz to 11 kHz, log-spaced, with auto gain. bars have
   gravity and peak caps like cava. if there's no pulse/pipewire monitor to
   grab it falls back to a decorative wave.
+- the `drop` visualizer cycles through 20 field equations milkdrop-style,
+  crossfading every 12–24s or early when the bass hits hard. `p` switches
+  it from half-block pixels to quadrant rendering (double resolution).
 - if playback suddenly breaks it's basically always yt-dlp being out of
   date. update it and try again.
 - ytmusicapi 1.12.x sometimes chokes on filtered search for signed-in
