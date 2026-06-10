@@ -309,6 +309,7 @@ class SpectrumTap:
         self._samples = None      # raw samples of latest chunk
         self._gain = 1e-6
         self._amp = 1e-4          # running amplitude for waveform autogain
+        self._sig_t = 0.0         # last time we actually heard something
         self._lock = threading.Lock()
         self._proc = None
         self._source_cmd = source_cmd
@@ -361,6 +362,8 @@ class SpectrumTap:
                 samples = np.frombuffer(buf, dtype=np.float32)
                 buf = b""
                 spec = np.abs(np.fft.rfft(samples * win))
+                if float(np.abs(samples).max()) > 1e-3:
+                    self._sig_t = time.time()
                 with self._lock:
                     self._spectrum = spec
                     self._samples = samples
@@ -389,6 +392,13 @@ class SpectrumTap:
         self._gain = max(self._gain * 0.996, peak, 1e-6)
         out = np.sqrt(np.clip(vals / self._gain, 0, 1))
         return out.tolist()
+
+    @property
+    def producing(self):
+        """True only if capture is up AND has heard real audio recently.
+        Lets the visualizer fall back to animation when the monitor is
+        silent (e.g. WSL can't loop back the sink)."""
+        return self.alive and (time.time() - self._sig_t) < 1.5
 
     def samples(self, n):
         """n waveform points in -1..1, autogained to fill the scope."""
@@ -485,6 +495,14 @@ def firefox_cookie_dbs():
             db = os.path.join(root, prof, "cookies.sqlite")
             if os.path.isfile(db):
                 dbs.append(db)
+    # WSL: the friend's browser lives on the Windows side. Firefox cookies
+    # aren't encrypted, so we can read them straight off the mounted drive.
+    import glob
+    for pat in ("/mnt/*/Users/*/AppData/Roaming/Mozilla/Firefox/Profiles/"
+                "*/cookies.sqlite",
+                "/mnt/*/Users/*/AppData/Roaming/librewolf/Profiles/"
+                "*/cookies.sqlite"):
+        dbs.extend(sorted(glob.glob(pat)))
     return dbs
 
 
@@ -1485,11 +1503,12 @@ class App:
         return lerp(ORANGE, PINK, (hfrac - 0.5) * 2)
 
     def _viz_targets(self, n):
-        """n spectrum levels 0..1 — real FFT if possible, anim otherwise."""
-        if self.tap and self.tap.alive:
-            return self.tap.levels(n)
+        """n spectrum levels 0..1 — real FFT when audio is flowing, a gentle
+        animation when we can't tap it, flat when paused."""
         if bool(self.player.props.get("pause")) or self.player.loading:
             return [0.0] * n
+        if self.tap and self.tap.producing:
+            return self.tap.levels(n)
         t = time.time()
         return [max(0.0, min(1.0,
                 (math.sin(t * 2.1 + i * 0.55) +
@@ -1568,10 +1587,10 @@ class App:
     def _viz_scope(self, w, rows, n, pad_l):
         """Braille oscilloscope of the raw waveform."""
         wd, hd = n * 2, rows * 4                    # dot resolution
-        if self.tap and self.tap.alive:
-            s = self.tap.samples(wd)
-        elif bool(self.player.props.get("pause")) or self.player.loading:
+        if bool(self.player.props.get("pause")) or self.player.loading:
             s = [0.0] * wd
+        elif self.tap and self.tap.producing:
+            s = self.tap.samples(wd)
         else:
             t = time.time()
             s = [math.sin(t * 3.0 + x * 0.11) *
@@ -1747,11 +1766,11 @@ class App:
         Wpx = W * 2 if self.drop_hd else W   # hi-def: 2×2 px per cell
         pad = (w - W) // 2
 
-        if self.tap and self.tap.alive:
+        if bool(self.player.props.get("pause")) or self.player.loading:
+            raw = (0.0, 0.0, 0.0)
+        elif self.tap and self.tap.producing:
             lv = self.tap.levels(18)
             raw = (sum(lv[:5]) / 5, sum(lv[5:12]) / 7, sum(lv[12:]) / 6)
-        elif bool(self.player.props.get("pause")) or self.player.loading:
-            raw = (0.0, 0.0, 0.0)
         else:
             t0 = time.time()
             raw = (0.4 + 0.3 * math.sin(t0 * 1.9),

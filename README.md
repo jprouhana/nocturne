@@ -35,6 +35,9 @@ cd ytm-tui
 That sets up a venv, drops a `ytm` launcher into `~/.local/bin`, and offers
 to sign you in.
 
+**On Windows?** It runs through WSL — there's a gentle, no-experience
+walkthrough at [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md).
+
 ## signing in
 
 ```sh
