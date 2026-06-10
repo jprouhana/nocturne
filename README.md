@@ -62,7 +62,7 @@ chmod 600, never leaves your machine.
 | `L` | like song | `m` | mute |
 | `s` | shuffle queue | `r` | repeat |
 | `v` | cycle visualizer | `C` | cycle color theme |
-| `w` | work mode (no art) | | |
+| `w` | work mode (no art) | `f` | fullscreen |
 | `1`-`4` / `tab` | switch view | `x` | drop from queue |
 | `esc` / `h` | back out of playlist | `q` | quit |
 

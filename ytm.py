@@ -596,6 +596,37 @@ LOGO = [
     "▝█▄█▘   █     █ ▀ █ █   █ ▝▀▀█▖  █  ▐▌  ",
     "  █     █     █   █ ▜▄▄▄▛ ▄▄▄█▘ ▄█▄ ▝█▄▄",
 ]
+_GLYPHS = {
+    "Y": ["██╗   ██╗", "╚██╗ ██╔╝", " ╚████╔╝ ",
+          "  ╚██╔╝  ", "   ██║   ", "   ╚═╝   "],
+    "T": ["████████╗", "╚══██╔══╝", "   ██║   ",
+          "   ██║   ", "   ██║   ", "   ╚═╝   "],
+    "M": ["███╗   ███╗", "████╗ ████║", "██╔████╔██║",
+          "██║╚██╔╝██║", "██║ ╚═╝ ██║", "╚═╝     ╚═╝"],
+    "U": ["██╗   ██╗", "██║   ██║", "██║   ██║",
+          "██║   ██║", "╚██████╔╝", " ╚═════╝ "],
+    "S": ["███████╗", "██╔════╝", "███████╗",
+          "╚════██║", "███████║", "╚══════╝"],
+    "I": ["██╗", "██║", "██║", "██║", "██║", "╚═╝"],
+    "C": [" ██████╗", "██╔════╝", "██║     ",
+          "██║     ", "╚██████╗", " ╚═════╝"],
+    " ": ["  "] * 6,
+}
+BIG_LOGO = [" ".join(_GLYPHS[ch][r] for ch in "YT MUSIC") for r in range(6)]
+
+
+def shadow_text(line, c1, c2):
+    """ANSI-shadow lettering: blocks get the gradient, shadows go dim."""
+    n = max(len(line) - 1, 1)
+    out = []
+    for i, ch in enumerate(line):
+        if ch == "█":
+            out.append(fg(lerp(c1, c2, i / n)) + ch)
+        elif ch == " ":
+            out.append(ch)
+        else:
+            out.append(fg(DGREY) + ch)
+    return "".join(out) + RESET
 # braille dot bits, [x][y] within a 2×4 cell
 BRAILLE = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]]
 
@@ -642,6 +673,16 @@ class App:
         self._drop_last = time.time()
         self._drop_e = [0.0, 0.0, 0.0]   # smoothed bass/mid/treble
         self._drop_lut_cache = None
+        # milkdrop-style preset morphing
+        self._drop_preset = random.randrange(6)
+        self._drop_prev = self._drop_preset
+        self._drop_pa = self._drop_new_params()
+        self._drop_pb = self._drop_pa
+        self._drop_mix = 1.0
+        self._drop_switch_at = time.time() + random.uniform(20, 35)
+        self._drop_last_switch = 0.0
+        self._drop_bass_avg = 0.15
+        self.full = False
         self.liked_now = False
         self.input_mode = False
         self.input_buf = ""
@@ -916,6 +957,7 @@ class App:
         if k == "q":
             self.running = False
         elif k == "/":
+            self.full = False          # can't see the search box otherwise
             self.input_mode = True
             self.input_buf = ""
         elif k in ("UP", "k"):
@@ -959,11 +1001,13 @@ class App:
             self.work = not self.work
             self.say("work mode — art hidden" if self.work
                      else "work mode off")
-        elif k == "C":
+        elif k in ("c", "C"):
             self.theme_i = (self.theme_i + 1) % len(THEMES)
             set_theme(self.theme_i)
             self._drop_lut_cache = None
             self.say(f"theme: {THEMES[self.theme_i][0]}")
+        elif k == "f":
+            self.full = not self.full
         elif k == "\t":
             self.tab = (self.tab + 1) % len(TABS)
         elif k == "SHIFT-TAB":
@@ -994,18 +1038,21 @@ class App:
                              "terminal too small (need ≥ 60×16)" + RESET)
             sys.stdout.flush()
             return
-        left_w = max(34, int(w * 0.42))
-        right_w = w - left_w - 1
-
-        lines = []
-        lines.extend(self._render_header(w))
-        body_h = h - len(lines) - 1
-        left = self._render_list(left_w, body_h)
-        right = self._render_now(right_w, body_h)
-        sep = fg(DGREY) + "│" + RESET
-        for i in range(body_h):
-            lines.append(left[i] + sep + right[i])
-        lines.append(self._render_footer(w))
+        if self.full:
+            lines = self._render_now(w, h - 1)
+            lines.append(self._render_footer(w))
+        else:
+            left_w = max(34, int(w * 0.42))
+            right_w = w - left_w - 1
+            lines = []
+            lines.extend(self._render_header(w))
+            body_h = h - len(lines) - 1
+            left = self._render_list(left_w, body_h)
+            right = self._render_now(right_w, body_h)
+            sep = fg(DGREY) + "│" + RESET
+            for i in range(body_h):
+                lines.append(left[i] + sep + right[i])
+            lines.append(self._render_footer(w))
 
         out = ["\x1b[H"]
         for i, ln in enumerate(lines[:h]):
@@ -1027,16 +1074,27 @@ class App:
         tab_bar = (fg(DGREY) + "·" + RESET).join(tabs)
 
         lines = []
-        for r, row in enumerate(LOGO):
-            # gradient drifts down-left as it descends the rows
-            cl = lerp(RED, PINK, r / 2)
-            cr = lerp(ORANGE, RED, r / 2)
-            ln = ("  " + fg(lerp(RED, DARK, r * 0.18)) + BADGE[r] + RESET +
-                  "  " + grad_text(row, cl, cr))
-            if r == 0:
-                pad = w - visible_len(ln) - visible_len(acct) - 2
-                ln += " " * max(pad, 1) + acct + " "
-            lines.append(crop_pad(ln, w))
+        big = w >= 76 and self.size.lines >= 26
+        if big:
+            for r, row in enumerate(BIG_LOGO):
+                cl = lerp(RED, PINK, r / 5)
+                cr = lerp(ORANGE, RED, r / 5)
+                ln = "  " + shadow_text(row, cl, cr)
+                if r == 0:
+                    pad = w - visible_len(ln) - visible_len(acct) - 2
+                    ln += " " * max(pad, 1) + acct + " "
+                lines.append(crop_pad(ln, w))
+        else:
+            for r, row in enumerate(LOGO):
+                # gradient drifts down-left as it descends the rows
+                cl = lerp(RED, PINK, r / 2)
+                cr = lerp(ORANGE, RED, r / 2)
+                ln = ("  " + fg(lerp(RED, DARK, r * 0.18)) + BADGE[r] + RESET +
+                      "  " + grad_text(row, cl, cr))
+                if r == 0:
+                    pad = w - visible_len(ln) - visible_len(acct) - 2
+                    ln += " " * max(pad, 1) + acct + " "
+                lines.append(crop_pad(ln, w))
         lines.append(crop_pad("  " + tab_bar, w))
         lines.append(fg(DGREY) + "─" * w + RESET)
         return lines
@@ -1127,10 +1185,10 @@ class App:
         # geometry: art on top, then meta, visualizer (grabs leftover), progress
         if self.work:
             art_h = 0                      # no thumbnails in work mode
-            viz_rows = max(2, min(h - 7, 16))
+            viz_rows = max(2, min(h - 7, 24))
         else:
             art_h = max(min(h - 11, (w - 6) // 2, 22), 4)
-            viz_rows = max(2, min(h - art_h - 7, 9))
+            viz_rows = max(2, min(h - art_h - 7, 18 if self.full else 9))
 
         out.append(crop_pad("", w))
         if not self.work:
@@ -1261,6 +1319,54 @@ class App:
             lines.append(crop_pad(" " * pad_l + "".join(cells) + RESET, w))
         return lines
 
+    def _drop_new_params(self):
+        return {"k1": random.uniform(2.0, 5.5),
+                "k2": random.uniform(2.0, 8.0),
+                "arms": random.choice([2, 3, 3, 4, 5, 6]),
+                "ph": random.uniform(0, math.tau)}
+
+    def _drop_field(self, preset, P, xs, ys, r, ang, t, eb, em, et):
+        """One milkdrop-ish interference field. Each preset is a different
+        equation; bass=rings/zoom, mid=swirl/speed, treble=fine ripple."""
+        import numpy as np
+        if preset == 0:    # pulse rings + swirl
+            return (np.sin(r * (P["k1"] * 1.5 + 9 * eb) - t * 2.0)
+                    + np.sin(xs * (2.5 + 4 * et) + t)
+                    + np.sin(ys * 3.0 - t * 0.8)
+                    + np.sin(ang * P["arms"] + t * (0.4 + 1.6 * em)))
+        if preset == 1:    # tunnel
+            return (np.sin(P["k1"] * 2.2 / (r + 0.35) - t * (1.5 + 2 * em))
+                    + np.sin(ang * P["arms"] + t * 0.7)
+                    + np.sin(r * (4 + 6 * eb) - t * 2.0)
+                    + et * 2.0 * np.sin(xs * 8 + t * 3))
+        if preset == 2:    # two orbiting sources
+            ox = 0.7 * math.cos(t * 0.6 + P["ph"])
+            oy = 0.55 * math.sin(t * 0.43)
+            d1 = np.sqrt((xs - ox) ** 2 + (ys - oy) ** 2)
+            d2 = np.sqrt((xs + ox) ** 2 + (ys + oy) ** 2)
+            return (np.sin(d1 * (P["k1"] * 2 + 6 * eb) - t * 2.0)
+                    + np.sin(d2 * (P["k2"] + 4 * em) + t * 1.5)
+                    + np.sin(ang * 2 + t * 0.5)
+                    + et * 1.5 * np.sin(r * 12 - t * 4))
+        if preset == 3:    # kaleidoscope
+            m = np.abs(((ang * P["arms"] / math.pi) % 2) - 1)
+            return (np.sin(r * (P["k1"] * 2 + 8 * eb) - t * 1.8)
+                    + np.sin(m * math.pi * P["k2"] + t * (0.5 + 1.5 * em))
+                    + np.sin(r * 3 + m * 4 - t)
+                    + et * 1.5 * np.sin(r * 14 - t * 5))
+        if preset == 4:    # weave
+            return (np.sin(xs * P["k1"] * 2 + t * (0.8 + em))
+                    + np.sin(ys * P["k2"] - t)
+                    + np.sin((xs + ys) * 2.5 + t * 1.3
+                             + 3 * eb * math.sin(t))
+                    + np.sin(r * (5 + 7 * eb) - t * 2))
+        # 5: spiral galaxy
+        return (np.sin(ang * P["arms"] + r * (P["k1"] * 3 + 6 * eb)
+                       - t * (2 + 2 * em))
+                + np.sin(r * 5 - t * 1.5)
+                + np.sin(xs * 3 + t * 0.7)
+                + et * 1.5 * np.sin(r * 16 - t * 5))
+
     def _drop_lut(self):
         """64-entry palette: dark → primary → secondary → accent → white."""
         if self._drop_lut_cache is None:
@@ -1308,10 +1414,33 @@ class App:
         xs = np.linspace(-1.6, 1.6, W)[None, :]
         r = np.sqrt(xs * xs + ys * ys) + 1e-6
         ang = np.arctan2(ys, xs)
-        v = (np.sin(r * (5.0 + 9.0 * eb) - t * 2.0)        # bass: pulse rings
-             + np.sin(xs * (2.5 + 4.0 * et) + t)           # treble: ripple
-             + np.sin(ys * 3.0 - t * 0.8)
-             + np.sin(ang * 3.0 + t * (0.4 + 1.6 * em)))   # mid: swirl
+
+        # milkdrop-style preset switching: on a timer, or on a hard bass hit
+        self._drop_bass_avg = self._drop_bass_avg * 0.985 + eb * 0.015
+        beat = (eb > self._drop_bass_avg * 2.2 + 0.18
+                and now - self._drop_last_switch > 9)
+        if (now >= self._drop_switch_at or beat) and self._drop_mix >= 1.0:
+            self._drop_prev = self._drop_preset
+            self._drop_pb = self._drop_pa
+            self._drop_preset = random.choice(
+                [i for i in range(6) if i != self._drop_preset])
+            self._drop_pa = self._drop_new_params()
+            self._drop_mix = 0.0
+            self._drop_last_switch = now
+            self._drop_switch_at = now + random.uniform(20, 40)
+
+        if self._drop_mix < 1.0:
+            self._drop_mix = min(1.0, self._drop_mix + dt / 2.5)
+            mx = self._drop_mix
+            mx = mx * mx * (3 - 2 * mx)                # smoothstep crossfade
+            va = self._drop_field(self._drop_prev, self._drop_pb,
+                                  xs, ys, r, ang, t, eb, em, et)
+            vb = self._drop_field(self._drop_preset, self._drop_pa,
+                                  xs, ys, r, ang, t, eb, em, et)
+            v = va * (1 - mx) + vb * mx
+        else:
+            v = self._drop_field(self._drop_preset, self._drop_pa,
+                                 xs, ys, r, ang, t, eb, em, et)
         v = (v + 4.0) / 8.0
         bright = 0.30 + 0.70 * min(1.0, (eb + em + et) * 0.8)
         idx = np.clip((v * 63).astype(int), 0, 63)
@@ -1382,11 +1511,17 @@ class App:
     def _render_footer(self, w):
         if self.status and time.time() - self.status_t < 4:
             return crop_pad("  " + fg(ORANGE) + self.status + RESET, w)
-        keys = [("/", "find"), ("↵", "play"), ("spc", "pause"),
-                ("n/b", "skip"), ("q", "quit"), ("v", "viz"),
-                ("C", "theme"), ("w", "work"), ("a", "+queue"), ("L", "like"),
-                (",/.", "seek"), ("±", "vol"), ("s", "shuf"),
-                ("r", "rep"), ("tab", "view")]
+        if self.full:
+            keys = [("f", "exit full"), ("spc", "pause"), ("n/b", "skip"),
+                    ("v", "viz"), ("c", "theme"), ("w", "work"),
+                    ("±", "vol"), ("q", "quit")]
+        else:
+            keys = [("/", "find"), ("↵", "play"), ("spc", "pause"),
+                    ("n/b", "skip"), ("q", "quit"), ("f", "full"),
+                    ("v", "viz"), ("c", "theme"), ("w", "work"),
+                    ("a", "+queue"), ("L", "like"), (",/.", "seek"),
+                    ("±", "vol"), ("s", "shuf"), ("r", "rep"),
+                    ("tab", "view")]
         # add hints while they fit, most important first
         line, used = "  ", 2
         for i, (k, v) in enumerate(keys):
