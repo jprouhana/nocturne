@@ -629,6 +629,8 @@ def shadow_text(line, c1, c2):
     return "".join(out) + RESET
 # braille dot bits, [x][y] within a 2×4 cell
 BRAILLE = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]]
+# quadrant blocks indexed by TL*8 + TR*4 + BL*2 + BR
+QUADS = " ▗▖▄▝▐▞▟▘▚▌▙▀▜▛█"
 
 
 class App:
@@ -676,12 +678,13 @@ class App:
         self._drop_e = [0.0, 0.0, 0.0]   # smoothed bass/mid/treble
         self._drop_lut_cache = None
         # milkdrop-style preset morphing
-        self._drop_preset = random.randrange(6)
+        self._drop_preset = random.randrange(self.N_PRESETS)
         self._drop_prev = self._drop_preset
         self._drop_pa = self._drop_new_params()
         self._drop_pb = self._drop_pa
         self._drop_mix = 1.0
-        self._drop_switch_at = time.time() + random.uniform(20, 35)
+        self._drop_switch_at = time.time() + random.uniform(12, 24)
+        self.drop_hd = state.get("drop_hd", False)
         self._drop_last_switch = 0.0
         self._drop_bass_avg = 0.15
         self.full = False
@@ -715,6 +718,7 @@ class App:
                 json.dump({"volume": self.player.props.get("volume", 70),
                            "repeat": self.repeat, "work": self.work,
                            "viz": self.viz_style,
+                           "drop_hd": self.drop_hd,
                            "theme": THEMES[self.theme_i][0]}, f)
         except Exception:
             pass
@@ -1010,6 +1014,10 @@ class App:
             self.say(f"theme: {THEMES[self.theme_i][0]}")
         elif k == "f":
             self.full = not self.full
+        elif k == "p":
+            self.drop_hd = not self.drop_hd
+            self.say("drop: hi-def pixels" if self.drop_hd
+                     else "drop: chunky pixels")
         elif k == "\t":
             self.tab = (self.tab + 1) % len(TABS)
         elif k == "SHIFT-TAB":
@@ -1346,47 +1354,125 @@ class App:
                 "arms": random.choice([2, 3, 3, 4, 5, 6]),
                 "ph": random.uniform(0, math.tau)}
 
+    N_PRESETS = 20
+
     def _drop_field(self, preset, P, xs, ys, r, ang, t, eb, em, et):
         """One milkdrop-ish interference field. Each preset is a different
         equation; bass=rings/zoom, mid=swirl/speed, treble=fine ripple."""
         import numpy as np
+        sin, cos = np.sin, np.cos
+        k1, k2, A, ph = P["k1"], P["k2"], P["arms"], P["ph"]
         if preset == 0:    # pulse rings + swirl
-            return (np.sin(r * (P["k1"] * 1.5 + 9 * eb) - t * 2.0)
-                    + np.sin(xs * (2.5 + 4 * et) + t)
-                    + np.sin(ys * 3.0 - t * 0.8)
-                    + np.sin(ang * P["arms"] + t * (0.4 + 1.6 * em)))
+            return (sin(r * (k1 * 1.5 + 9 * eb) - t * 2.0)
+                    + sin(xs * (2.5 + 4 * et) + t)
+                    + sin(ys * 3.0 - t * 0.8)
+                    + sin(ang * A + t * (0.4 + 1.6 * em)))
         if preset == 1:    # tunnel
-            return (np.sin(P["k1"] * 2.2 / (r + 0.35) - t * (1.5 + 2 * em))
-                    + np.sin(ang * P["arms"] + t * 0.7)
-                    + np.sin(r * (4 + 6 * eb) - t * 2.0)
-                    + et * 2.0 * np.sin(xs * 8 + t * 3))
+            return (sin(k1 * 2.2 / (r + 0.35) - t * (1.5 + 2 * em))
+                    + sin(ang * A + t * 0.7)
+                    + sin(r * (4 + 6 * eb) - t * 2.0)
+                    + et * 2.0 * sin(xs * 8 + t * 3))
         if preset == 2:    # two orbiting sources
-            ox = 0.7 * math.cos(t * 0.6 + P["ph"])
+            ox = 0.7 * math.cos(t * 0.6 + ph)
             oy = 0.55 * math.sin(t * 0.43)
             d1 = np.sqrt((xs - ox) ** 2 + (ys - oy) ** 2)
             d2 = np.sqrt((xs + ox) ** 2 + (ys + oy) ** 2)
-            return (np.sin(d1 * (P["k1"] * 2 + 6 * eb) - t * 2.0)
-                    + np.sin(d2 * (P["k2"] + 4 * em) + t * 1.5)
-                    + np.sin(ang * 2 + t * 0.5)
-                    + et * 1.5 * np.sin(r * 12 - t * 4))
+            return (sin(d1 * (k1 * 2 + 6 * eb) - t * 2.0)
+                    + sin(d2 * (k2 + 4 * em) + t * 1.5)
+                    + sin(ang * 2 + t * 0.5)
+                    + et * 1.5 * sin(r * 12 - t * 4))
         if preset == 3:    # kaleidoscope
-            m = np.abs(((ang * P["arms"] / math.pi) % 2) - 1)
-            return (np.sin(r * (P["k1"] * 2 + 8 * eb) - t * 1.8)
-                    + np.sin(m * math.pi * P["k2"] + t * (0.5 + 1.5 * em))
-                    + np.sin(r * 3 + m * 4 - t)
-                    + et * 1.5 * np.sin(r * 14 - t * 5))
+            m = np.abs(((ang * A / math.pi) % 2) - 1)
+            return (sin(r * (k1 * 2 + 8 * eb) - t * 1.8)
+                    + sin(m * math.pi * k2 + t * (0.5 + 1.5 * em))
+                    + sin(r * 3 + m * 4 - t)
+                    + et * 1.5 * sin(r * 14 - t * 5))
         if preset == 4:    # weave
-            return (np.sin(xs * P["k1"] * 2 + t * (0.8 + em))
-                    + np.sin(ys * P["k2"] - t)
-                    + np.sin((xs + ys) * 2.5 + t * 1.3
-                             + 3 * eb * math.sin(t))
-                    + np.sin(r * (5 + 7 * eb) - t * 2))
-        # 5: spiral galaxy
-        return (np.sin(ang * P["arms"] + r * (P["k1"] * 3 + 6 * eb)
-                       - t * (2 + 2 * em))
-                + np.sin(r * 5 - t * 1.5)
-                + np.sin(xs * 3 + t * 0.7)
-                + et * 1.5 * np.sin(r * 16 - t * 5))
+            return (sin(xs * k1 * 2 + t * (0.8 + em))
+                    + sin(ys * k2 - t)
+                    + sin((xs + ys) * 2.5 + t * 1.3 + 3 * eb * math.sin(t))
+                    + sin(r * (5 + 7 * eb) - t * 2))
+        if preset == 5:    # spiral galaxy
+            return (sin(ang * A + r * (k1 * 3 + 6 * eb) - t * (2 + 2 * em))
+                    + sin(r * 5 - t * 1.5)
+                    + sin(xs * 3 + t * 0.7)
+                    + et * 1.5 * sin(r * 16 - t * 5))
+        if preset == 6:    # moiré ring interference
+            return (sin(r * (k1 * 5 + 4 * eb) - t)
+                    + sin(r * (k1 * 5 + 0.8) + t * 0.4)
+                    + sin(ang * A - t * (0.5 + em))
+                    + et * 1.5 * sin(r * 18 - t * 5))
+        if preset == 7:    # rose petals
+            return (sin(A * ang + t) * cos(r * (4 + 6 * eb) - t * 1.5) * 2
+                    + sin(r * 3 - t)
+                    + em * 1.5 * sin(ang * 2 + t * 1.3))
+        if preset == 8:    # lissajous drift
+            return (sin(xs * k1 * 2 + math.sin(t * 0.8) * 3)
+                    + sin(ys * k2 + math.cos(t * 0.6) * 3)
+                    + sin(r * (5 + 8 * eb) - t)
+                    + et * 1.5 * sin((xs - ys) * 7 + t * 2))
+        if preset == 9:    # diamond pulse
+            d = np.abs(xs) + np.abs(ys)
+            return (sin(d * (4 + 8 * eb) - t * 2)
+                    + sin(ang * 2 + t * (0.4 + em))
+                    + sin(d * 2 + t * 0.6)
+                    + et * 1.5 * sin(r * 15 - t * 4))
+        if preset == 10:   # square tunnel
+            q = np.maximum(np.abs(xs), np.abs(ys))
+            return (sin(q * (5 + 8 * eb) - t * 2)
+                    + sin(q * k1 + t * 0.7)
+                    + sin(ang * A + t * em * 2)
+                    + et * sin(xs * 9 + t * 3))
+        if preset == 11:   # vortex twist
+            tw = ang + r * (1.0 + 2.0 * em)
+            return (sin(tw * A - t * 2)
+                    + sin(r * (6 + 6 * eb) - t)
+                    + sin(tw * 2 + t * 0.5)
+                    + et * 1.5 * sin(r * 13 + t * 3))
+        if preset == 12:   # ripple grid
+            return (sin(xs * k1 * 3 - t) * sin(ys * k1 * 3 + t) * 2
+                    + sin(r * (4 + 8 * eb) - t * 2)
+                    + em * sin((xs + ys) * 4 + t))
+        if preset == 13:   # starburst fan
+            return (sin(ang * A * 2 + t)
+                    + sin(r * (3 + 6 * eb) - t * 2)
+                    + em * 2 * sin(ang * 3 - r * 4 + t)
+                    + et * sin(r * 17 - t * 5))
+        if preset == 14:   # log zoom rush
+            return (sin(np.log(r + 0.2) * (6 + 4 * em) - t * (2 + 3 * eb))
+                    + sin(ang * A + t * 0.5)
+                    + sin(r * 4 - t)
+                    + et * 1.5 * sin(ang * 8 + t * 2))
+        if preset == 15:   # colliding wavefronts
+            d1 = np.sqrt((xs - 1.0) ** 2 + (ys - 0.7) ** 2)
+            d2 = np.sqrt((xs + 1.0) ** 2 + (ys + 0.7) ** 2)
+            return (sin(d1 * (k1 * 2 + 5 * eb) - t * 2)
+                    + sin(d2 * (k2 + 5 * eb) - t * 2)
+                    + sin(r * 3 + t * em)
+                    + et * sin((d1 - d2) * 8 + t * 3))
+        if preset == 16:   # warped silk
+            return (sin(xs * 4 + sin(ys * 3 + t) * (1.5 + 2 * eb))
+                    + sin(ys * 4 + sin(xs * 3 - t) * 1.5)
+                    + sin(r * 5 - t)
+                    + em * sin(ang * A + t))
+        if preset == 17:   # wandering eye
+            cx = 0.5 * math.cos(t * 0.5 + ph)
+            cy = 0.4 * math.sin(t * 0.37)
+            rr = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+            return (sin(rr * (6 + 9 * eb) - t * 2)
+                    + sin(ang * 2 + t * em * 2)
+                    + sin(rr * 2.5 + t * 0.5)
+                    + et * 1.5 * sin(rr * 16 - t * 5))
+        if preset == 18:   # checker pulse
+            return (sin(xs * k1 * 2 + t) * sin(ys * k2 * 2 - t)
+                    + sin((xs + ys) * 3 + t)
+                    + eb * 2 * sin(r * 8 - t * 3)
+                    + et * sin((xs - ys) * 9 - t * 2))
+        # 19: braided radial waves
+        return (sin(r * 8 - ang * A - t * 2)
+                + sin(r * 5 + ang * A + t)
+                + em * sin(ang * 4 + t)
+                + et * 2 * sin(r * 14 - t * 4))
 
     def _drop_lut(self):
         """64-entry palette: dark → primary → secondary → accent → white."""
@@ -1408,6 +1494,7 @@ class App:
         import numpy as np
         W = max(w - 4, 20)
         H = rows * 2
+        Wpx = W * 2 if self.drop_hd else W   # hi-def: 2×2 px per cell
         pad = (w - W) // 2
 
         if self.tap and self.tap.alive:
@@ -1432,23 +1519,23 @@ class App:
         t = self._drop_t
 
         ys = np.linspace(-1, 1, H)[:, None]
-        xs = np.linspace(-1.6, 1.6, W)[None, :]
+        xs = np.linspace(-1.6, 1.6, Wpx)[None, :]
         r = np.sqrt(xs * xs + ys * ys) + 1e-6
         ang = np.arctan2(ys, xs)
 
         # milkdrop-style preset switching: on a timer, or on a hard bass hit
         self._drop_bass_avg = self._drop_bass_avg * 0.985 + eb * 0.015
-        beat = (eb > self._drop_bass_avg * 2.2 + 0.18
-                and now - self._drop_last_switch > 9)
+        beat = (eb > self._drop_bass_avg * 2.0 + 0.15
+                and now - self._drop_last_switch > 7)
         if (now >= self._drop_switch_at or beat) and self._drop_mix >= 1.0:
             self._drop_prev = self._drop_preset
             self._drop_pb = self._drop_pa
             self._drop_preset = random.choice(
-                [i for i in range(6) if i != self._drop_preset])
+                [i for i in range(self.N_PRESETS) if i != self._drop_preset])
             self._drop_pa = self._drop_new_params()
             self._drop_mix = 0.0
             self._drop_last_switch = now
-            self._drop_switch_at = now + random.uniform(20, 40)
+            self._drop_switch_at = now + random.uniform(12, 24)
 
         if self._drop_mix < 1.0:
             self._drop_mix = min(1.0, self._drop_mix + dt / 2.5)
@@ -1468,11 +1555,40 @@ class App:
         rgb = np.clip(self._drop_lut()[idx] * bright, 0, 255).astype(int)
 
         lines = []
-        for row in range(rows):
-            top, bot = rgb[row * 2], rgb[row * 2 + 1]
-            cells = [f"\x1b[38;2;{tp[0]};{tp[1]};{tp[2]}m"
-                     f"\x1b[48;2;{bt[0]};{bt[1]};{bt[2]}m▀"
-                     for tp, bt in zip(top, bot)]
+        if not self.drop_hd:
+            for row in range(rows):
+                top, bot = rgb[row * 2], rgb[row * 2 + 1]
+                cells = [f"\x1b[38;2;{tp[0]};{tp[1]};{tp[2]}m"
+                         f"\x1b[48;2;{bt[0]};{bt[1]};{bt[2]}m▀"
+                         for tp, bt in zip(top, bot)]
+                lines.append(crop_pad(" " * pad + "".join(cells) + RESET, w))
+            return lines
+
+        # hi-def: pack each 2×2 pixel block into a quadrant glyph whose
+        # fg/bg split follows the brighter/darker pixels of the block
+        a = rgb.reshape(rows, 2, W, 2, 3).astype(float)
+        lum = a.mean(axis=-1)                              # rows,2,W,2
+        mean = lum.mean(axis=(1, 3), keepdims=True)
+        mask = lum >= mean
+        cnt = mask.sum(axis=(1, 3))
+        on = mask[..., None]
+        fgc = ((a * on).sum(axis=(1, 3)) /
+               np.clip(cnt, 1, 4)[..., None]).astype(int)
+        bgc = ((a * ~on).sum(axis=(1, 3)) /
+               np.clip(4 - cnt, 1, 4)[..., None]).astype(int)
+        bits = (mask[:, 0, :, 0].astype(int) * 8 + mask[:, 0, :, 1] * 4 +
+                mask[:, 1, :, 0] * 2 + mask[:, 1, :, 1])
+        for rr in range(rows):
+            cells = []
+            for cc in range(W):
+                bi = bits[rr, cc]
+                f, b = fgc[rr, cc], bgc[rr, cc]
+                if bi == 0:
+                    f = b
+                elif bi == 15:
+                    b = f
+                cells.append(f"\x1b[38;2;{f[0]};{f[1]};{f[2]}m"
+                             f"\x1b[48;2;{b[0]};{b[1]};{b[2]}m{QUADS[bi]}")
             lines.append(crop_pad(" " * pad + "".join(cells) + RESET, w))
         return lines
 
@@ -1534,8 +1650,8 @@ class App:
             return crop_pad("  " + fg(ORANGE) + self.status + RESET, w)
         if self.full:
             keys = [("f", "exit full"), ("spc", "pause"), ("n/b", "skip"),
-                    ("v", "viz"), ("c", "theme"), ("w", "work"),
-                    ("±", "vol"), ("q", "quit")]
+                    ("v", "viz"), ("c", "theme"), ("p", "hd"),
+                    ("w", "work"), ("±", "vol"), ("q", "quit")]
         else:
             keys = [("/", "find"), ("↵", "play"), ("spc", "pause"),
                     ("n/b", "skip"), ("q", "quit"), ("f", "full"),
@@ -1573,7 +1689,7 @@ class App:
                 # (smooth progress bar) with the visualizer itself cached
                 # down to ~12; idle screen is lazier
                 if self.now and self.viz_style == "drop":
-                    tick = 0.03
+                    tick = 0.04
                 elif self.now or self.input_mode:
                     tick = 0.04
                 else:
