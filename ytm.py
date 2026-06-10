@@ -298,7 +298,7 @@ class SpectrumTap:
     """
 
     RATE = 44100
-    CHUNK = 2048  # ~46 ms per FFT frame
+    CHUNK = 1024  # ~23 ms per FFT frame (~43 updates/sec)
 
     def __init__(self, source_cmd=None):
         self.alive = False
@@ -670,6 +670,7 @@ class App:
             if state.get("theme") in names else 0
         set_theme(self.theme_i)
         self._drop_t = 0.0
+        self._phys_t = time.time()
         self._drop_last = time.time()
         self._drop_e = [0.0, 0.0, 0.0]   # smoothed bass/mid/treble
         self._drop_lut_cache = None
@@ -1237,15 +1238,21 @@ class App:
                 random.uniform(-0.18, 0.18))) for i in range(n)]
 
     def _viz_physics(self, targets):
-        """Fast attack, gravity fall, falling peak caps."""
+        """Fast attack, gravity fall, falling peak caps. Time-based rates
+        so the feel is identical at any framerate."""
+        now = time.time()
+        dt = min(max(now - self._phys_t, 0.005), 0.2)
+        self._phys_t = now
+        fall = 1.1 * dt
+        pfall = 0.38 * dt
         n = len(targets)
         if len(self.bars) != n:
             self.bars = [0.0] * n
             self.peaks = [0.0] * n
         for i in range(n):
             tv, b = targets[i], self.bars[i]
-            self.bars[i] = tv if tv > b else max(b - 0.09, tv)
-            self.peaks[i] = max(self.peaks[i] - 0.030, self.bars[i])
+            self.bars[i] = tv if tv > b else max(b - fall, tv)
+            self.peaks[i] = max(self.peaks[i] - pfall, self.bars[i])
 
     def _render_visualizer(self, w, rows):
         n = max(w - 10, 16)
@@ -1399,14 +1406,14 @@ class App:
             raw = (0.4 + 0.3 * math.sin(t0 * 1.9),
                    0.4 + 0.3 * math.sin(t0 * 1.3 + 2),
                    0.3 + 0.2 * math.sin(t0 * 2.7 + 4))
-        for i, x in enumerate(raw):
-            e = self._drop_e[i]
-            self._drop_e[i] = e + (x - e) * (0.5 if x > e else 0.12)
-        eb, em, et = self._drop_e
-
         now = time.time()
         dt = min(now - self._drop_last, 0.25)
         self._drop_last = now
+        for i, x in enumerate(raw):
+            e = self._drop_e[i]
+            k = min(1.0, (10.0 if x > e else 2.4) * dt)
+            self._drop_e[i] = e + (x - e) * k
+        eb, em, et = self._drop_e
         self._drop_t += dt * (0.5 + 2.2 * em + 1.5 * eb)
         t = self._drop_t
 
@@ -1548,7 +1555,10 @@ class App:
                 if self.eof_flag.is_set():
                     self.eof_flag.clear()
                     self.next_track()
-                k = self.read_key(0.08)
+                # ~33 fps while something is on screen worth animating,
+                # lazy ~12 fps when idle
+                tick = 0.03 if (self.now or self.input_mode) else 0.08
+                k = self.read_key(tick)
                 if k:
                     self.handle_key(k)
                 self.render()
