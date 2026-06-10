@@ -781,6 +781,7 @@ class App:
         self.picker_sel = 0
         self.picker_track = None
         self._confirm_del = ("", 0.0)
+        self._now_wt = 0.0
         self.status = ""
         self.status_t = 0.0
         self.searching = False
@@ -937,13 +938,22 @@ class App:
 
     # ── playback ─────────────────────────────────────────────────────────────
     def _write_now(self):
-        """Drop now-playing info where widgets/scripts can read it."""
+        """Drop now-playing info where widgets/scripts can read it.
+        Lines: title, artist, album, pos secs, dur secs, state,
+        queue idx/len, next-up title."""
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
             with open(os.path.join(CONFIG_DIR, "now.txt"), "w") as f:
                 if self.now:
+                    pos = int(self.player.props.get("time-pos") or 0)
+                    dur = int(self.player.props.get("duration") or 0)
+                    state = ("paused" if self.player.props.get("pause")
+                             else "playing")
+                    nxt = (self.queue[self.qpos + 1].title
+                           if 0 <= self.qpos + 1 < len(self.queue) else "")
                     f.write(f"{self.now.title}\n{self.now.artist}\n"
-                            f"{self.now.album}\n")
+                            f"{self.now.album}\n{pos}\n{dur}\n{state}\n"
+                            f"{self.qpos + 1}/{len(self.queue)}\n{nxt}\n")
         except Exception:
             pass
 
@@ -1999,6 +2009,9 @@ class App:
                 if self.eof_flag.is_set():
                     self.eof_flag.clear()
                     self.next_track()
+                if self.now and time.time() - self._now_wt > 2:
+                    self._now_wt = time.time()
+                    self._write_now()
                 # drop flows at ~30 fps; other styles tick the UI at ~25
                 # (smooth progress bar) with the visualizer itself cached
                 # down to ~12; idle screen is lazier
