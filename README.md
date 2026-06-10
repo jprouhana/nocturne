@@ -61,6 +61,7 @@ chmod 600, never leaves your machine.
 | `a` | add to queue | `+` / `-` | volume |
 | `L` | like song | `m` | mute |
 | `s` | shuffle queue | `r` | repeat |
+| `v` | cycle visualizer | `w` | work mode (no art) |
 | `1`-`4` / `tab` | switch view | `x` | drop from queue |
 | `esc` / `h` | back out of playlist | `q` | quit |
 

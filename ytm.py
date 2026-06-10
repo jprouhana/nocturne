@@ -288,7 +288,9 @@ class SpectrumTap:
     def __init__(self, source_cmd=None):
         self.alive = False
         self._spectrum = None     # raw |rfft| of latest chunk
+        self._samples = None      # raw samples of latest chunk
         self._gain = 1e-6
+        self._amp = 1e-4          # running amplitude for waveform autogain
         self._lock = threading.Lock()
         self._proc = None
         self._source_cmd = source_cmd
@@ -343,6 +345,7 @@ class SpectrumTap:
                 spec = np.abs(np.fft.rfft(samples * win))
                 with self._lock:
                     self._spectrum = spec
+                    self._samples = samples
             self.alive = False
             self._proc = None
             if self._stop:
@@ -368,6 +371,17 @@ class SpectrumTap:
         self._gain = max(self._gain * 0.996, peak, 1e-6)
         out = np.sqrt(np.clip(vals / self._gain, 0, 1))
         return out.tolist()
+
+    def samples(self, n):
+        """n waveform points in -1..1, autogained to fill the scope."""
+        import numpy as np
+        with self._lock:
+            s = self._samples
+        if s is None:
+            return [0.0] * n
+        self._amp = max(self._amp * 0.995, float(np.abs(s).max()), 1e-4)
+        idx = np.linspace(0, len(s) - 1, n).astype(int)
+        return np.clip(s[idx] / self._amp, -1, 1).tolist()
 
     def stop(self):
         self._stop = True
@@ -560,6 +574,9 @@ def verify_auth():
 
 TABS = ["Search", "Library", "Playlists", "Queue"]
 BLOCKS = " ▁▂▃▄▅▆▇█"
+VIZ_STYLES = ["bars", "mirror", "scope", "bands"]
+# braille dot bits, [x][y] within a 2×4 cell
+BRAILLE = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]]
 
 
 class App:
@@ -592,6 +609,10 @@ class App:
         self.now: Track | None = None
 
         self.repeat = state.get("repeat", False)
+        self.work = state.get("work", False)
+        self.viz_style = state.get("viz", "bars")
+        if self.viz_style not in VIZ_STYLES:
+            self.viz_style = "bars"
         self.liked_now = False
         self.input_mode = False
         self.input_buf = ""
@@ -620,7 +641,8 @@ class App:
             os.makedirs(CONFIG_DIR, exist_ok=True)
             with open(STATE_FILE, "w") as f:
                 json.dump({"volume": self.player.props.get("volume", 70),
-                           "repeat": self.repeat}, f)
+                           "repeat": self.repeat, "work": self.work,
+                           "viz": self.viz_style}, f)
         except Exception:
             pass
 
@@ -898,6 +920,15 @@ class App:
         elif k == "r":
             self.repeat = not self.repeat
             self.say(f"repeat {'on' if self.repeat else 'off'}")
+        elif k == "v":
+            i = VIZ_STYLES.index(self.viz_style)
+            self.viz_style = VIZ_STYLES[(i + 1) % len(VIZ_STYLES)]
+            self.bars = []          # reset physics for the new style
+            self.say(f"visualizer: {self.viz_style}")
+        elif k == "w":
+            self.work = not self.work
+            self.say("work mode — art hidden" if self.work
+                     else "work mode off")
         elif k == "\t":
             self.tab = (self.tab + 1) % len(TABS)
         elif k == "SHIFT-TAB":
@@ -953,6 +984,8 @@ class App:
         badge = fg(RED) + "▶ " + RESET
         acct = (fg(GREEN) + "● signed in" if self.authed
                 else fg(GREY) + "○ guest — run: ytm --auth-firefox")
+        if self.work:
+            acct = fg(GREY) + "▪ work  " + acct
         tabs = []
         for i, t in enumerate(TABS):
             if i == self.tab:
@@ -1053,19 +1086,24 @@ class App:
             return out
 
         # geometry: art on top, then meta, visualizer (grabs leftover), progress
-        art_h = max(min(h - 11, (w - 6) // 2, 22), 4)
-        viz_rows = max(2, min(h - art_h - 7, 9))
-        art_w = art_h * 2
-        pad_l = max((w - art_w) // 2, 1)
-        art = self.art.get(self.now.thumb, art_w, art_h)
+        if self.work:
+            art_h = 0                      # no thumbnails in work mode
+            viz_rows = max(2, min(h - 7, 16))
+        else:
+            art_h = max(min(h - 11, (w - 6) // 2, 22), 4)
+            viz_rows = max(2, min(h - art_h - 7, 9))
 
         out.append(crop_pad("", w))
-        for row in range(art_h):
-            if art:
-                out.append(crop_pad(" " * pad_l + art[row], w))
-            else:
-                fill = fg(DGREY) + ("·" * art_w)
-                out.append(crop_pad(" " * pad_l + fill + RESET, w))
+        if not self.work:
+            art_w = art_h * 2
+            pad_l = max((w - art_w) // 2, 1)
+            art = self.art.get(self.now.thumb, art_w, art_h)
+            for row in range(art_h):
+                if art:
+                    out.append(crop_pad(" " * pad_l + art[row], w))
+                else:
+                    fill = fg(DGREY) + ("·" * art_w)
+                    out.append(crop_pad(" " * pad_l + fill + RESET, w))
 
         out.append(crop_pad("", w))
         title = self.now.title
@@ -1089,33 +1127,47 @@ class App:
             return lerp(RED, ORANGE, hfrac * 2)
         return lerp(ORANGE, PINK, (hfrac - 0.5) * 2)
 
-    def _render_visualizer(self, w, rows):
-        n = max(w - 10, 16)
-        paused = bool(self.player.props.get("pause"))
+    def _viz_targets(self, n):
+        """n spectrum levels 0..1 — real FFT if possible, anim otherwise."""
+        if self.tap and self.tap.alive:
+            return self.tap.levels(n)
+        if bool(self.player.props.get("pause")) or self.player.loading:
+            return [0.0] * n
+        t = time.time()
+        return [max(0.0, min(1.0,
+                (math.sin(t * 2.1 + i * 0.55) +
+                 math.sin(t * 3.7 + i * 0.21)) * 0.25 + 0.5 +
+                random.uniform(-0.18, 0.18))) for i in range(n)]
+
+    def _viz_physics(self, targets):
+        """Fast attack, gravity fall, falling peak caps."""
+        n = len(targets)
         if len(self.bars) != n:
             self.bars = [0.0] * n
             self.peaks = [0.0] * n
-
-        if self.tap and self.tap.alive:
-            targets = self.tap.levels(n)            # real FFT of the audio
-        elif paused or self.player.loading:
-            targets = [0.0] * n
-        else:                                       # decorative fallback
-            t = time.time()
-            targets = [max(0.0, min(1.0,
-                       (math.sin(t * 2.1 + i * 0.55) +
-                        math.sin(t * 3.7 + i * 0.21)) * 0.25 + 0.5 +
-                       random.uniform(-0.18, 0.18))) for i in range(n)]
-
         for i in range(n):
-            tv = targets[i]
-            b = self.bars[i]
-            # fast attack, gravity fall
+            tv, b = targets[i], self.bars[i]
             self.bars[i] = tv if tv > b else max(b - 0.09, tv)
             self.peaks[i] = max(self.peaks[i] - 0.030, self.bars[i])
 
-        unit = rows * 8
+    def _render_visualizer(self, w, rows):
+        n = max(w - 10, 16)
         pad_l = (w - n) // 2
+        if self.viz_style == "scope":
+            return self._viz_scope(w, rows, n, pad_l)
+        if self.viz_style == "bands":
+            return self._viz_bands(w, rows, n, pad_l)
+
+        if self.viz_style == "mirror":
+            m = n // 2 + 1
+            lv = self._viz_targets(m)
+            c = (n - 1) / 2
+            targets = [lv[min(int(abs(i - c)), m - 1)] for i in range(n)]
+        else:
+            targets = self._viz_targets(n)
+        self._viz_physics(targets)
+
+        unit = rows * 8
         cap_c = fg(lerp(WHITE, PINK, 0.35))
         lines = []
         for r in range(rows):
@@ -1133,6 +1185,53 @@ class App:
                     else:
                         cells.append(" ")
             lines.append(crop_pad(" " * pad_l + "".join(cells) + RESET, w))
+        return lines
+
+    def _viz_scope(self, w, rows, n, pad_l):
+        """Braille oscilloscope of the raw waveform."""
+        wd, hd = n * 2, rows * 4                    # dot resolution
+        if self.tap and self.tap.alive:
+            s = self.tap.samples(wd)
+        elif bool(self.player.props.get("pause")) or self.player.loading:
+            s = [0.0] * wd
+        else:
+            t = time.time()
+            s = [math.sin(t * 3.0 + x * 0.11) *
+                 (0.5 + 0.3 * math.sin(t * 0.9)) for x in range(wd)]
+        grid = [[0] * n for _ in range(rows)]
+        prev = None
+        for x, v in enumerate(s):
+            y = int((0.5 - v * 0.48) * (hd - 1))
+            y = max(0, min(hd - 1, y))
+            lo, hi = (y, y) if prev is None else (min(prev, y), max(prev, y))
+            for yy in range(lo, hi + 1):
+                grid[yy // 4][x // 2] |= BRAILLE[x % 2][yy % 4]
+            prev = y
+        lines = []
+        for r in range(rows):
+            cells = []
+            for i in range(n):
+                m = grid[r][i]
+                if m:
+                    c = lerp(RED, ORANGE, i / max(n - 1, 1))
+                    cells.append(fg(c) + chr(0x2800 + m))
+                else:
+                    cells.append(" ")
+            lines.append(crop_pad(" " * pad_l + "".join(cells) + RESET, w))
+        return lines
+
+    def _viz_bands(self, w, rows, n, pad_l):
+        """Centered horizontal bars, one frequency band per row, bass low."""
+        self._viz_physics(self._viz_targets(rows))
+        lines = []
+        for r in range(rows):
+            i = rows - 1 - r                        # bass at the bottom
+            v = self.bars[i]
+            width = int(v * n) or (1 if v > 0.02 else 0)
+            c = self._viz_color(i / max(rows - 1, 1))
+            lp = (n - width) // 2
+            lines.append(crop_pad(
+                " " * (pad_l + lp) + fg(c) + "▆" * width + RESET, w))
         return lines
 
     def _render_progress(self, w):
@@ -1178,9 +1277,10 @@ class App:
         if self.status and time.time() - self.status_t < 4:
             return crop_pad("  " + fg(ORANGE) + self.status + RESET, w)
         keys = [("/", "find"), ("↵", "play"), ("spc", "pause"),
-                ("n/b", "skip"), ("q", "quit"), ("a", "+queue"),
-                ("L", "like"), (",/.", "seek"), ("±", "vol"),
-                ("s", "shuf"), ("r", "rep"), ("tab", "view")]
+                ("n/b", "skip"), ("q", "quit"), ("v", "viz"),
+                ("w", "work"), ("a", "+queue"), ("L", "like"),
+                (",/.", "seek"), ("±", "vol"), ("s", "shuf"),
+                ("r", "rep"), ("tab", "view")]
         # add hints while they fit, most important first
         line, used = "  ", 2
         for i, (k, v) in enumerate(keys):
