@@ -756,7 +756,7 @@ class App:
         self.theme_i = names.index(state["theme"]) \
             if state.get("theme") in names else 0
         set_theme(self.theme_i)
-        self._drop_t = 0.0
+        self._drop_t = random.uniform(0, 90)   # never open on the same look
         self._viz_cache = None
         self._phys_t = time.time()
         self._drop_last = time.time()
@@ -1463,10 +1463,15 @@ class App:
         # geometry: art on top, then meta, visualizer (grabs leftover), progress
         if self.work:
             art_h = 0                      # no thumbnails in work mode
-            viz_rows = max(2, min(h - 7, 24))
+            viz_rows = max(2, min(h - 7, 26))
+        elif self.full:
+            # fullscreen: split the room — art stays prominent but the
+            # visualizer gets real height instead of a thin strip
+            art_h = max(min(h - 18, (w - 6) // 2, 18), 4)
+            viz_rows = max(4, min(h - art_h - 7, 22))
         else:
             art_h = max(min(h - 11, (w - 6) // 2, 22), 4)
-            viz_rows = max(2, min(h - art_h - 7, 18 if self.full else 9))
+            viz_rows = max(2, min(h - art_h - 7, 9))
 
         out.append(crop_pad("", w))
         if not self.work:
@@ -1621,7 +1626,21 @@ class App:
         return {"k1": random.uniform(2.0, 5.5),
                 "k2": random.uniform(2.0, 8.0),
                 "arms": random.choice([2, 3, 3, 4, 5, 6]),
-                "ph": random.uniform(0, math.tau)}
+                "ph": random.uniform(0, math.tau),
+                # post-processing personality: 0 = smooth, n = n sharp
+                # palette bands (milkdrop-style colorful level sets)
+                "band": random.choice([0, 0, 0, 2, 2, 3, 3, 4]),
+                "gam": random.uniform(0.95, 1.45)}
+
+    def _drop_post(self, v, P):
+        """Contrast shaping — this is what makes presets pop instead of
+        rendering as the same mid-palette mush."""
+        import numpy as np
+        v = np.clip(0.5 + v / 5.5, 0.0, 1.0)
+        v = np.clip((v - 0.5) * 1.25 + 0.5, 0.0, 1.0) ** P["gam"]
+        if P["band"]:
+            return 0.5 - 0.5 * np.cos(v * math.tau * P["band"])
+        return 0.5 - 0.5 * np.cos(v * math.pi)
 
     N_PRESETS = 20
 
@@ -1747,13 +1766,16 @@ class App:
         """64-entry palette: dark → primary → secondary → accent → white."""
         if self._drop_lut_cache is None:
             import numpy as np
-            stops = [DARK, lerp(DARK, RED, 0.6), RED, ORANGE, PINK,
-                     lerp(PINK, WHITE, 0.7)]
+            # anchored dark lows so light themes (ice…) still have contrast
+            stops = [(8, 8, 14), lerp((8, 8, 14), RED, 0.45), RED,
+                     ORANGE, PINK, lerp(PINK, WHITE, 0.55)]
+            pos = [0.0, 0.34, 0.60, 0.80, 0.94, 1.0]
             lut = []
             for i in range(64):
-                t = i / 63 * (len(stops) - 1)
-                a = min(int(t), len(stops) - 2)
-                lut.append(lerp(stops[a], stops[a + 1], t - a))
+                t = i / 63
+                a = max(j for j in range(len(pos) - 1) if pos[j] <= t)
+                f = (t - pos[a]) / (pos[a + 1] - pos[a])
+                lut.append(lerp(stops[a], stops[a + 1], f))
             self._drop_lut_cache = np.array(lut, dtype=float)
         return self._drop_lut_cache
 
@@ -1787,8 +1809,12 @@ class App:
         self._drop_t += dt * (0.5 + 2.2 * em + 1.5 * eb)
         t = self._drop_t
 
-        ys = np.linspace(-1, 1, H)[:, None]
-        xs = np.linspace(-1.6, 1.6, Wpx)[None, :]
+        # aspect-correct coordinates: half-block pixels are ~square, so the
+        # field stops stretching into smears on wide panels (rings stay round)
+        aspect = min(W / max(H, 1), 4.5)   # cap so wide strips stay coherent
+        zoom = 1.15
+        ys = np.linspace(-zoom, zoom, H)[:, None]
+        xs = np.linspace(-aspect * zoom, aspect * zoom, Wpx)[None, :]
         r = np.sqrt(xs * xs + ys * ys) + 1e-6
         ang = np.arctan2(ys, xs)
 
@@ -1810,16 +1836,18 @@ class App:
             self._drop_mix = min(1.0, self._drop_mix + dt / 2.5)
             mx = self._drop_mix
             mx = mx * mx * (3 - 2 * mx)                # smoothstep crossfade
-            va = self._drop_field(self._drop_prev, self._drop_pb,
-                                  xs, ys, r, ang, t, eb, em, et)
-            vb = self._drop_field(self._drop_preset, self._drop_pa,
-                                  xs, ys, r, ang, t, eb, em, et)
+            va = self._drop_post(self._drop_field(
+                self._drop_prev, self._drop_pb,
+                xs, ys, r, ang, t, eb, em, et), self._drop_pb)
+            vb = self._drop_post(self._drop_field(
+                self._drop_preset, self._drop_pa,
+                xs, ys, r, ang, t, eb, em, et), self._drop_pa)
             v = va * (1 - mx) + vb * mx
         else:
-            v = self._drop_field(self._drop_preset, self._drop_pa,
-                                 xs, ys, r, ang, t, eb, em, et)
-        v = (v + 4.0) / 8.0
-        bright = 0.30 + 0.70 * min(1.0, (eb + em + et) * 0.8)
+            v = self._drop_post(self._drop_field(
+                self._drop_preset, self._drop_pa,
+                xs, ys, r, ang, t, eb, em, et), self._drop_pa)
+        bright = 0.26 + 0.74 * min(1.0, (eb + em + et) * 0.9)
         idx = np.clip((v * 63).astype(int), 0, 63)
         rgb = np.clip(self._drop_lut()[idx] * bright, 0, 255).astype(int)
 
@@ -1901,7 +1929,7 @@ class App:
 
         vol_w = 12
         vfill = int(vol / 130 * vol_w)
-        vbar = (fg(PINK) + "▮" * vfill + fg(DGREY) + "▯" * (vol_w - vfill) + RESET)
+        vbar = (fg(PINK) + "█" * vfill + fg(DGREY) + "░" * (vol_w - vfill) + RESET)
         flags = []
         if self.repeat:
             flags.append(fg(ORANGE) + "⟲ repeat" + RESET)
@@ -1981,6 +2009,110 @@ class App:
 # entry
 # ──────────────────────────────────────────────────────────────────────────────
 
+def ansi_line_to_pango(s):
+    """Translate one truecolor-ANSI line into pango markup for eww/GTK."""
+    out, buf = [], []
+    fgc = bgc = None
+
+    def flush():
+        if not buf:
+            return
+        text = ("".join(buf).replace("&", "&amp;")
+                .replace("<", "&lt;").replace(">", "&gt;"))
+        attrs = []
+        if fgc:
+            attrs.append(f"foreground='#{fgc[0]:02x}{fgc[1]:02x}{fgc[2]:02x}'")
+        if bgc:
+            attrs.append(f"background='#{bgc[0]:02x}{bgc[1]:02x}{bgc[2]:02x}'")
+        if attrs:
+            out.append(f"<span {' '.join(attrs)}>{text}</span>")
+        else:
+            out.append(text)
+        buf.clear()
+
+    i = 0
+    while i < len(s):
+        m = ANSI_RE.match(s, i)
+        if m:
+            codes = [int(x) for x in
+                     (m.group(0)[2:-1] or "0").split(";") if x != ""] or [0]
+            j = 0
+            nf, nb = fgc, bgc
+            while j < len(codes):
+                if codes[j] == 0:
+                    nf = nb = None
+                elif codes[j] == 38 and j + 4 < len(codes) and codes[j+1] == 2:
+                    nf = (codes[j+2], codes[j+3], codes[j+4]); j += 4
+                elif codes[j] == 48 and j + 4 < len(codes) and codes[j+1] == 2:
+                    nb = (codes[j+2], codes[j+3], codes[j+4]); j += 4
+                j += 1
+            if (nf, nb) != (fgc, bgc):
+                flush()
+                fgc, bgc = nf, nb
+            i = m.end()
+            continue
+        buf.append(s[i])
+        i += 1
+    flush()
+    return "".join(out)
+
+
+def eww_stream(spec, style, fps, theme_name):
+    """Headless visualizer feed for an eww widget (deflisten).
+
+    Prints one pango-markup line per frame, rows joined with &#10;.
+    Visualizes whatever the system is playing — no TUI, no mpv."""
+    try:
+        cols, rows = (int(x) for x in spec.lower().split("x"))
+    except ValueError:
+        print("--eww expects COLSxROWS, e.g. 64x9", file=sys.stderr)
+        return False
+    names = [t[0] for t in THEMES]
+    set_theme(names.index(theme_name) if theme_name in names else 0)
+    if style not in VIZ_STYLES:
+        style = "drop"
+
+    import types
+    v = types.SimpleNamespace()
+    for name in dir(App):
+        if name.startswith(("_viz", "_drop")) or name == "_render_visualizer_now":
+            v.__dict__[name] = getattr(App, name).__get__(v)
+    v.N_PRESETS = App.N_PRESETS
+    v.viz_style = style
+    v.drop_hd = True
+    v.bars, v.peaks = [], []
+    v._phys_t = time.time()
+    v.player = types.SimpleNamespace(props={}, loading=False)
+    v.tap = SpectrumTap()
+    v._viz_cache = None
+    v._drop_t = random.uniform(0, 90)
+    v._drop_last = time.time()
+    v._drop_e = [0.0, 0.0, 0.0]
+    v._drop_lut_cache = None
+    v._drop_preset = random.randrange(App.N_PRESETS)
+    v._drop_prev = v._drop_preset
+    v._drop_pa = v._drop_new_params()
+    v._drop_pb = v._drop_pa
+    v._drop_mix = 1.0
+    v._drop_switch_at = time.time() + random.uniform(12, 24)
+    v._drop_last_switch = 0.0
+    v._drop_bass_avg = 0.15
+
+    period = 1.0 / max(min(fps, 30), 1)
+    try:
+        while True:
+            t0 = time.time()
+            lines = v._render_visualizer_now(cols, rows)
+            print("&#10;".join(ansi_line_to_pango(ln) for ln in lines),
+                  flush=True)
+            time.sleep(max(0.0, period - (time.time() - t0)))
+    except (BrokenPipeError, KeyboardInterrupt):
+        pass
+    finally:
+        v.tap.stop()
+    return True
+
+
 def doctor():
     ok = True
     for tool in ("mpv", "yt-dlp", "ffmpeg"):
@@ -2013,11 +2145,23 @@ def main():
                     help="import session from a browser non-interactively "
                          "(chrome, brave, edge, chromium, vivaldi, opera)")
     ap.add_argument("--doctor", action="store_true", help="check dependencies")
+    ap.add_argument("--eww", metavar="WxH",
+                    help="stream visualizer frames as pango markup for an "
+                         "eww widget, e.g. --eww 64x9")
+    ap.add_argument("--eww-style", default="drop", choices=VIZ_STYLES,
+                    help="visualizer style for --eww (default: drop)")
+    ap.add_argument("--eww-fps", type=int, default=10,
+                    help="frame rate for --eww (default: 10)")
+    ap.add_argument("--eww-theme", default="ytm",
+                    help="color theme for --eww (default: ytm)")
     ap.add_argument("--ao", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.doctor:
         sys.exit(0 if doctor() else 1)
+    if args.eww:
+        sys.exit(0 if eww_stream(args.eww, args.eww_style,
+                                 args.eww_fps, args.eww_theme) else 1)
     if args.login:
         sys.exit(0 if login_wizard() else 1)
     if args.auth:

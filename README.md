@@ -85,6 +85,8 @@ guest mode.
 - the `drop` visualizer cycles through 20 field equations milkdrop-style,
   crossfading every 12–24s or early when the bass hits hard. `p` switches
   it from half-block pixels to quadrant rendering (double resolution).
+- you can embed the visualizer in an [eww](https://github.com/elkowar/eww)
+  widget — see [docs/EWW-WIDGET.md](docs/EWW-WIDGET.md).
 - if playback suddenly breaks it's basically always yt-dlp being out of
   date. update it and try again.
 - ytmusicapi 1.12.x sometimes chokes on filtered search for signed-in
