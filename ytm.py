@@ -2057,7 +2057,7 @@ def ansi_line_to_pango(s):
     return "".join(out)
 
 
-def eww_stream(spec, style, fps, theme_name):
+def eww_stream(spec, style, fps, theme_name, frame_title=None):
     """Headless visualizer feed for an eww widget (deflisten).
 
     Prints one pango-markup line per frame, rows joined with &#10;.
@@ -2098,13 +2098,22 @@ def eww_stream(spec, style, fps, theme_name):
     v._drop_last_switch = 0.0
     v._drop_bass_avg = 0.15
 
+    top = bot = None
+    if frame_title:
+        # ascii box matching the classic eww hud style:
+        # +-- TITLE ------+ / |rows| / +-----------+
+        top = ("+-- " + frame_title + " ").ljust(cols + 1, "-") + "+"
+        bot = "+" + "-" * cols + "+"
+
     period = 1.0 / max(min(fps, 30), 1)
     try:
         while True:
             t0 = time.time()
             lines = v._render_visualizer_now(cols, rows)
-            print("&#10;".join(ansi_line_to_pango(ln) for ln in lines),
-                  flush=True)
+            rows_md = [ansi_line_to_pango(ln) for ln in lines]
+            if frame_title:
+                rows_md = [top] + ["|" + r + "|" for r in rows_md] + [bot]
+            print("&#10;".join(rows_md), flush=True)
             time.sleep(max(0.0, period - (time.time() - t0)))
     except (BrokenPipeError, KeyboardInterrupt):
         pass
@@ -2154,14 +2163,16 @@ def main():
                     help="frame rate for --eww (default: 10)")
     ap.add_argument("--eww-theme", default="ytm",
                     help="color theme for --eww (default: ytm)")
+    ap.add_argument("--eww-frame", metavar="TITLE", default=None,
+                    help="wrap --eww frames in an ascii box with this title")
     ap.add_argument("--ao", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.doctor:
         sys.exit(0 if doctor() else 1)
     if args.eww:
-        sys.exit(0 if eww_stream(args.eww, args.eww_style,
-                                 args.eww_fps, args.eww_theme) else 1)
+        sys.exit(0 if eww_stream(args.eww, args.eww_style, args.eww_fps,
+                                 args.eww_theme, args.eww_frame) else 1)
     if args.login:
         sys.exit(0 if login_wizard() else 1)
     if args.auth:

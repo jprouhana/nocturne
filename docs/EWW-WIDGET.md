@@ -6,7 +6,7 @@ PipeWire monitor as the TUI, so it dances to whatever your system is playing
 (any player, not just ytm). No mpv, no TTY.
 
 ```sh
-ytm --eww 56x7 --eww-style drop --eww-theme ice --eww-fps 8
+ytm --eww 62x8 --eww-style drop --eww-theme ocean --eww-fps 8 --eww-frame "AUDIO FIELD"
 ```
 
 - `--eww-style` any of: drop, bars, mirror, scope, bands
