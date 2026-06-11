@@ -69,7 +69,7 @@ guest mode.
 | `a` | add to queue | `+` / `-` | volume |
 | `A` | add track to a playlist | `N` | new playlist |
 | `x` | remove (queue/liked/playlist) | `D``D` | delete playlist |
-| `L` | like song | `m` | mute |
+| `L` | like / unlike (toggles) | `m` | mute |
 | `s` | shuffle queue | `r` | repeat |
 | `v` | cycle visualizer | `c` | cycle color theme |
 | `w` | work mode (no art) | `f` | fullscreen |

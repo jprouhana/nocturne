@@ -841,6 +841,7 @@ class App:
         self._confirm_del = ("", 0.0)
         self._now_wt = 0.0
         self._like_t = 0.0    # timestamp of last like → heart splash
+        self._like_mode = "like"   # "like" = heart pop, "break" = heartbreak
         self.status = ""
         self.status_t = 0.0
         self.searching = False
@@ -1055,6 +1056,8 @@ class App:
         self.qpos = idx
         self.now = self.queue[idx]
         self.liked_now = False
+        if self.authed:
+            self._fetch_like_state(self.now.video_id)
         self.player.play_video(self.now.video_id)
         self._write_now()
         self.say(f"▶ {self.now.title}")
@@ -1105,13 +1108,40 @@ class App:
                 self.queue.append(lst[i])
                 self.say(f"+ queued: {lst[i].title}")
 
+    def _fetch_like_state(self, vid):
+        """The header ♥ (and the L toggle) should know whether the track
+        is already liked, not just whether it was liked this session."""
+        def work():
+            try:
+                data = self.yt.get_watch_playlist(videoId=vid, limit=1)
+                tr = (data.get("tracks") or [{}])[0]
+                if self.now and self.now.video_id == vid:
+                    self.liked_now = tr.get("likeStatus") == "LIKE"
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
     def like_current(self):
         if not self.now:
             return
         if not self.authed:
             self.say("liking needs sign-in → ytm --login")
             return
+        if self.liked_now:           # L on a liked song = unlike, heartbreak
+            self._like_t = time.time()
+            self._like_mode = "break"
+            self.liked_now = False
+
+            def work():
+                try:
+                    self.yt.rate_song(self.now.video_id, "INDIFFERENT")
+                    self.say(f"♡ unliked: {self.now.title}")
+                except Exception as e:
+                    self.say(f"unlike failed: {e}")
+            threading.Thread(target=work, daemon=True).start()
+            return
         self._like_t = time.time()   # heart splash, optimistic
+        self._like_mode = "like"
 
         def work():
             try:
@@ -1159,6 +1189,9 @@ class App:
                 if pl.playlist_id == "LM":      # Liked Music is rate-based
                     self.yt.rate_song(track.video_id, "LIKE")
                     self._like_t = time.time()
+                    self._like_mode = "like"
+                    if self.now and self.now.video_id == track.video_id:
+                        self.liked_now = True
                 else:
                     self.yt.add_playlist_items(pl.playlist_id,
                                                [track.video_id])
@@ -1172,6 +1205,10 @@ class App:
         if not (0 <= i < len(self.lib)):
             return
         track = self.lib[i]
+        self._like_t = time.time()
+        self._like_mode = "break"
+        if self.now and self.now.video_id == track.video_id:
+            self.liked_now = False
 
         def work():
             try:
@@ -1618,62 +1655,126 @@ class App:
             out.append(crop_pad("", w))
         out = out[:h]
         t = time.time() - self._like_t
-        if t < 1.4:
-            out = self._like_splash(out, w, t)
+        if t < (1.4 if self._like_mode == "like" else 1.8):
+            splash = (self._like_splash if self._like_mode == "like"
+                      else self._break_splash)
+            out = splash(out, w, t)
         return out
 
-    def _like_splash(self, out, w, t):
-        """Big pulsing heart composited over the panel right after a like.
-        The shape is the classic (x²+y²−1)³ = x²y³ curve, scaled up as it
-        pops in, colored with a theme pulse. Everything around the curve
-        stays transparent so the panel keeps living underneath."""
-        import numpy as np
+    def _splash_geom(self, out, w):
+        """Shared layout for the like/heartbreak splashes."""
         h = len(out)
         rows = min(14, max(6, h - 6))
         cols = min(rows * 2, w - 6)
-        s = min(1.0, 0.35 + t * 3.5)             # pop-in scale
-        c = lerp(RED, PINK, 0.5 + 0.5 * math.sin(t * 9))
-        xs = np.linspace(-1.45, 1.45, cols)[None, :] / s
-        ys = np.linspace(1.35, -1.45, rows * 2)[:, None] / s
-        inside = (xs ** 2 + ys ** 2 - 1) ** 3 - xs ** 2 * ys ** 3 < 0
         pad_l = (w - cols) // 2
         band0 = max(1, (h - rows - 2) // 2)
-        col = fg(c)
-        for r in range(rows):
+        return rows, cols, pad_l, band0
+
+    def _heart_mask(self, rows, cols, s=1.0):
+        """The classic (x²+y²−1)³ = x²y³ heart curve as a boolean pixel
+        grid, two pixel rows per cell row, scaled by s for the pop-in."""
+        import numpy as np
+        xs = np.linspace(-1.45, 1.45, cols)[None, :] / s
+        ys = np.linspace(1.35, -1.45, rows * 2)[:, None] / s
+        return (xs ** 2 + ys ** 2 - 1) ** 3 - xs ** 2 * ys ** 3 < 0
+
+    def _stamp_pixels(self, out, w, pix, band0, pad_l, col):
+        """Half-block render of a boolean pixel grid composited onto the
+        frame — transparent where empty, and edge halves borrow the color
+        underneath so the shape has no black fringe."""
+        h = len(out)
+        for r in range(len(pix) // 2):
             if band0 + r >= h - 1:
                 break
-            top, bot = inside[r * 2], inside[r * 2 + 1]
+            top, bot = pix[r * 2], pix[r * 2 + 1]
+            if not top.any() and not bot.any():
+                continue
             cells = ansi_cells(out[band0 + r], w)
-            for i in range(cols):
+            for i in range(len(top)):
                 if top[i] and bot[i]:
                     put_cell(cells, pad_l + i, col, "█")
                 elif top[i] or bot[i]:
-                    # edge cell — paint the empty half with whatever color
-                    # is underneath so the curve has no black fringe
                     under = sgr_to_bg(cells[pad_l + i][0])
                     put_cell(cells, pad_l + i, under + col,
                              "▀" if top[i] else "▄")
             out[band0 + r] = cells_to_str(cells)
-        if band0 + rows < h - 1 and t > 0.25:
-            # L I K E D — each letter shakes and flashes through the theme
-            label = "LIKED"
-            theme = (RED, ORANGE, PINK)
-            span = len(label) * 4 - 3
-            x0 = (w - span) // 2
-            two_rows = band0 + rows + 1 < h - 1
-            lines = {0: ansi_cells(out[band0 + rows], w)}
-            if two_rows:
-                lines[1] = ansi_cells(out[band0 + rows + 1], w)
-            for i, ch in enumerate(label):
-                cc = theme[int(t * 12 + i) % len(theme)]
-                jx = random.randint(-1, 1)
-                jy = 1 if two_rows and random.random() < 0.3 else 0
-                x = x0 + i * 4 + jx
-                under = sgr_to_bg(lines[jy][x][0]) if 0 <= x < w else ""
-                put_cell(lines[jy], x, under + BOLD + fg(cc), ch)
-            out[band0 + rows] = cells_to_str(lines[0])
-            if two_rows:
-                out[band0 + rows + 1] = cells_to_str(lines[1])
+
+    def _splash_label(self, out, w, row0, label, t, colors, fall):
+        """Spaced-out word under the splash — every letter flashes through
+        `colors` and shakes; `fall` is the chance a letter drops a row."""
+        h = len(out)
+        if row0 >= h - 1:
+            return
+        x0 = (w - (len(label) * 4 - 3)) // 2
+        two_rows = row0 + 1 < h - 1
+        lines = {0: ansi_cells(out[row0], w)}
+        if two_rows:
+            lines[1] = ansi_cells(out[row0 + 1], w)
+        for i, ch in enumerate(label):
+            cc = colors[int(t * 12 + i) % len(colors)]
+            jx = random.randint(-1, 1)
+            jy = 1 if two_rows and random.random() < fall else 0
+            x = x0 + i * 4 + jx
+            under = sgr_to_bg(lines[jy][x][0]) if 0 <= x < w else ""
+            put_cell(lines[jy], x, under + BOLD + fg(cc), ch)
+        out[row0] = cells_to_str(lines[0])
+        if two_rows:
+            out[row0 + 1] = cells_to_str(lines[1])
+
+    def _like_splash(self, out, w, t):
+        """Big pulsing heart composited over the panel right after a like,
+        popping in with a theme pulse. Everything around the curve stays
+        transparent so the panel keeps living underneath."""
+        rows, cols, pad_l, band0 = self._splash_geom(out, w)
+        s = min(1.0, 0.35 + t * 3.5)             # pop-in scale
+        c = lerp(RED, PINK, 0.5 + 0.5 * math.sin(t * 9))
+        pix = self._heart_mask(rows, cols, s)
+        self._stamp_pixels(out, w, pix, band0, pad_l, fg(c))
+        if t > 0.25:
+            self._splash_label(out, w, band0 + rows, "LIKED", t,
+                               (RED, ORANGE, PINK), 0.3)
+        return out
+
+    def _break_splash(self, out, w, t):
+        """The same heart, breaking: a panicked flutter, then a jagged
+        crack opens and the two halves drift apart and sink while the
+        color drains out of them."""
+        import numpy as np
+        rows, cols, pad_l, band0 = self._splash_geom(out, w)
+        inside = self._heart_mask(rows, cols)
+        u = max(0.0, (t - 0.35) / 1.45)          # 0 = crack opens, 1 = gone
+        if t < 0.35:                             # panic heartbeat
+            c = lerp(RED, PINK, 0.5 + 0.5 * math.sin(t * 26))
+        else:
+            c = lerp(RED, (115, 115, 130), min(1.0, u * 1.5))
+
+        ph, pw = rows * 2, cols
+        pix = np.zeros((ph + int(u * u * 12) + 2, pw), dtype=bool)
+        jx = random.randint(-1, 1) if t < 0.35 else 0
+        dx = int(u * u * cols * 0.22)            # halves drift apart...
+        dyl = int(u * u * 11)                    # ...and sink, left faster
+        dyr = int(u * u * 7)
+        gap = 0 if t < 0.35 else 1 + int(u * 2.5)
+        mid = pw // 2
+        for yy in range(ph):
+            crack = mid + ((yy * 5 // 3) % 3) - 1    # jagged, deterministic
+            row = inside[yy]
+            for i in range(pw):
+                if not row[i]:
+                    continue
+                if gap and abs(i - crack) < gap:
+                    continue                     # splinters off at the crack
+                if i < crack:
+                    x, y = i - dx + jx, yy + dyl
+                else:
+                    x, y = i + dx + jx, yy + dyr
+                if 0 <= x < pw and y < len(pix):
+                    pix[y, x] = True
+        self._stamp_pixels(out, w, pix, band0, pad_l, fg(c))
+        if t > 0.45:
+            grief = ((205, 205, 215), (140, 140, 155), (95, 95, 110))
+            self._splash_label(out, w, band0 + rows, "UNLIKED", t,
+                               grief, min(0.8, u + 0.2))
         return out
 
     def _viz_color(self, hfrac):
