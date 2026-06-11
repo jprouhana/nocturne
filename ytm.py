@@ -1876,8 +1876,8 @@ class App:
         ys = np.linspace(1.35, -1.45, rows * 2)[:, None] / s
         ax = np.abs(xs)
         lobes = (ax - 0.62) ** 2 + (ys - 0.45) ** 2 < 0.49
-        wedge = (ys <= 0.45) & (ys >= -1.35) & \
-                (ax < 1.32 * (ys + 1.35) / 1.8)
+        wedge = (ys <= 0.45) & (ys >= -1.05) & \
+                (ax < 1.32 * (ys + 1.05) / 1.5)
         return lobes | wedge
 
     def _stamp_pixels(self, out, w, pix, band0, pad_l, col):
@@ -2268,9 +2268,12 @@ class App:
                     + et * sin(r * 15 - t * 4))
         if preset == 23:   # comet swirl — log-spiral arms breathing
             sw = ang * A + np.log(r + 0.25) * (k2 + 2 * em)
+            # the slow overtone needs an INTEGER angular frequency —
+            # sw*0.5 with odd arms tears along the arctan2 branch cut
+            sw2 = ang * ((A + 1) // 2) + np.log(r + 0.25) * (k2 * 0.5 + em)
             return (sin(sw - t * 1.8)
                     + sin(r * (4 + 9 * eb) - t * 2.2)
-                    + sin(sw * 0.5 + t * 0.7)
+                    + sin(sw2 + t * 0.7)
                     + et * 1.3 * sin(r * 12 + ang * 2 - t * 3))
         # the centerless family: lattices and fractal fields with no focal
         # point — the whole panel is the subject, not a bullseye
@@ -2422,13 +2425,22 @@ class App:
         # averaging 4 subsamples per pixel costs nothing at that size
         ss = 1 if mode == 1 else 2
         if mode == 3:
-            # pixel: real screen pixels, capped so encode+transport stays
-            # fast — the terminal scales the bitmap to the panel anyway
+            # pixel: real screen pixels, with an adaptive budget — spend
+            # resolution until the frame cost eats the tick, back off when
+            # the encode (or a slow terminal) pushes back. the terminal
+            # scales the bitmap to the panel either way
             ss = 1
             cw, chh = self._cell_px()
-            Wpx, Hpx = W * cw, rows * chh
-            sc = min(1.0, math.sqrt(400_000 / max(1, Wpx * Hpx)))
-            Wpx, Hpx = max(64, int(Wpx * sc)), max(64, int(Hpx * sc))
+            nat_w, nat_h = W * cw, rows * chh
+            b = getattr(self, "_px_budget", 280_000.0)
+            cost = getattr(self, "_frame_cost", 0.0)
+            if cost > 0.020:
+                b = max(140_000.0, b * 0.92)
+            elif cost < 0.014:
+                b = min(520_000.0, b * 1.04)
+            self._px_budget = b
+            sc = min(1.0, math.sqrt(b / max(1, nat_w * nat_h)))
+            Wpx, Hpx = max(64, int(nat_w * sc)), max(64, int(nat_h * sc))
         else:
             Wpx = (W * 2 if mode else W) * ss   # hi-def: 2×2 px per cell
             Hpx = H * ss
@@ -2467,8 +2479,15 @@ class App:
         zoom = 1.15 / (1.0 + 0.16 * ps)    # camera swells in on the kick
         # sample budget: maximized terminals ask for ~10× the pixels of the
         # side panel — compute the field at a capped resolution and stretch
-        fs = max(1.0, math.sqrt(Wpx * Hpx / 140_000))
-        fw, fh = max(8, int(Wpx / fs)), max(8, int(Hpx / fs))
+        if mode == 3:
+            # field res pinned to the panel's native size, NOT the
+            # adaptive output budget — otherwise every budget step would
+            # change the field shape and reset the temporal ease
+            fs = max(1.0, math.sqrt(nat_w * nat_h / 140_000))
+            fw, fh = max(8, int(nat_w / fs)), max(8, int(nat_h / fs))
+        else:
+            fs = max(1.0, math.sqrt(Wpx * Hpx / 140_000))
+            fw, fh = max(8, int(Wpx / fs)), max(8, int(Hpx / fs))
         # float32 end to end: the trig-heavy field math and the upsample
         # run 2-4× faster, and 24-bit color can't show the difference
         ys = np.linspace(-zoom, zoom, fh, dtype=np.float32)[:, None]
@@ -2688,19 +2707,27 @@ class App:
                 if self.now and time.time() - self._now_wt > 2:
                     self._now_wt = time.time()
                     self._write_now()
-                # drop runs at ~60 fps; other styles tick the UI at ~25
-                # (smooth progress bar) with the visualizer itself cached
-                # down to ~12; idle screen is lazier
+                # drop runs flat out (~125 fps tick, render cost is the
+                # real ceiling); other styles tick the UI at ~25 (smooth
+                # progress bar) with the visualizer itself cached down to
+                # ~12; idle screen is lazier
                 if self.viz_style == "drop" and (self.now or self.viz_max):
-                    tick = 0.016
+                    tick = 0.008
                 elif self.now or self.input_mode or self.viz_max:
                     tick = 0.04
                 else:
                     tick = 0.12
-                k = self.read_key(tick)
+                # constant cadence: sleep what's left of the tick after
+                # the last render, so frame intervals don't see-saw
+                # between tick and tick+render — that wobble reads as
+                # stutter on fast monitors
+                k = self.read_key(
+                    max(0.002, tick - getattr(self, "_frame_cost", 0.0)))
                 if k:
                     self.handle_key(k)
+                t0 = time.perf_counter()
                 self.render()
+                self._frame_cost = time.perf_counter() - t0
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
             if self._kitty_ok:

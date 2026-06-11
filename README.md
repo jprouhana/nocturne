@@ -91,8 +91,10 @@ guest mode.
   pixel: the field blitted as a true RGB bitmap over the kitty graphics
   protocol, real screen pixels with no block characters at all.
   everything is anti-aliased and eased between frames, so dense spots
-  (a swirl core) stay smooth instead of strobing, and the drop ticks at
-  ~60 fps while it owns the screen.
+  (a swirl core) stay smooth instead of strobing. the drop runs flat out
+  while it owns the screen — frame cadence is held constant (render cost
+  is subtracted from the tick), and pixel mode auto-tunes its resolution
+  to whatever your machine sustains.
 - the plasma is beat-locked: it tracks bass kicks and the song's tempo,
   so the field punches in on the beat and bobs with the groove instead of
   flickering at every spectrum wiggle. `[` `]` tune how hard the beat
