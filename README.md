@@ -39,6 +39,9 @@ theme, visualizer flavor, search style — in one pass.
 
 **On Windows?** It runs through WSL — there's a gentle, no-experience
 walkthrough at [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md).
+**On a Mac?** `brew install mpv yt-dlp ffmpeg` and you're most of the way —
+[docs/INSTALL-MACOS.md](docs/INSTALL-MACOS.md) covers the visualizer's
+loopback device and terminal choice.
 
 ## signing in
 

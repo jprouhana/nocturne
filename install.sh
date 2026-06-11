@@ -15,6 +15,7 @@ if [ -n "$missing" ]; then
     echo "  arch:   sudo pacman -S$missing"
     echo "  debian: sudo apt install$missing"
     echo "  fedora: sudo dnf install$missing"
+    echo "  macos:  brew install$missing"
     exit 1
 fi
 

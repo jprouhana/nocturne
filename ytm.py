@@ -393,18 +393,54 @@ class SpectrumTap:
         except Exception:
             return ""
 
+    @staticmethod
+    def _coreaudio_loopback():
+        """macOS: find a loopback device (BlackHole et al) in ffmpeg's
+        avfoundation list — returns its audio index, or None."""
+        try:
+            out = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-f", "avfoundation",
+                 "-list_devices", "true", "-i", ""],
+                capture_output=True, text=True, timeout=5).stderr
+        except Exception:
+            return None
+        audio = False
+        for ln in out.splitlines():
+            low = ln.lower()
+            if "avfoundation audio devices" in low:
+                audio = True
+                continue
+            if "avfoundation video devices" in low:
+                audio = False
+                continue
+            if audio and ("blackhole" in low or "loopback" in low
+                          or "soundflower" in low):
+                m = re.findall(r"\[(\d+)\]", ln)
+                if m:
+                    return int(m[-1])
+        return None
+
     def _build_cmd(self):
         if self._source_cmd:
             return self._source_cmd
-        if not shutil.which("parec"):
-            return None
-        sink = self._default_sink()
-        if not sink:
-            return None
-        self._sink = sink
-        return ["parec", "--raw", "--format=float32le",
-                f"--rate={self.RATE}", "--channels=1",
-                "--latency-msec=30", "-d", f"{sink}.monitor"]
+        if shutil.which("parec"):
+            sink = self._default_sink()
+            if sink:
+                self._sink = sink
+                return ["parec", "--raw", "--format=float32le",
+                        f"--rate={self.RATE}", "--channels=1",
+                        "--latency-msec=30", "-d", f"{sink}.monitor"]
+        if sys.platform == "darwin" and shutil.which("ffmpeg"):
+            # no monitor sources on coreaudio — tap a loopback device
+            # (brew install blackhole-2ch + a multi-output device)
+            idx = self._coreaudio_loopback()
+            if idx is not None:
+                self._sink = ""
+                return ["ffmpeg", "-hide_banner", "-loglevel", "quiet",
+                        "-f", "avfoundation", "-i", f":{idx}",
+                        "-ac", "1", "-ar", str(self.RATE),
+                        "-f", "f32le", "-"]
+        return None
 
     def _run(self):
         import numpy as np
@@ -622,6 +658,8 @@ def firefox_cookie_dbs():
         os.path.expanduser("~/.var/app/org.mozilla.firefox/.mozilla/firefox"),
         os.path.expanduser("~/.var/app/io.gitlab.librewolf-community/.librewolf"),
         os.path.expanduser("~/.librewolf"),
+        os.path.expanduser("~/Library/Application Support/Firefox/Profiles"),
+        os.path.expanduser("~/Library/Application Support/librewolf/Profiles"),
     ]
     dbs = []
     for root in roots:
@@ -3194,9 +3232,15 @@ def setup_wizard():
     print(BOLD + "ytm setup" + RESET + "\n")
     print("dependencies:")
     if not doctor():
-        print("\n  fix the ✗ lines first (on Arch: "
-              "sudo pacman -S mpv yt-dlp ffmpeg), then rerun ytm setup.")
+        hint = ("brew install mpv yt-dlp ffmpeg"
+                if sys.platform == "darwin"
+                else "sudo pacman -S mpv yt-dlp ffmpeg")
+        print(f"\n  fix the ✗ lines first ({hint}), then rerun ytm setup.")
         return False
+    if sys.platform == "darwin" and not SpectrumTap._coreaudio_loopback():
+        print("  ○ no loopback audio device — the visualizer will run on")
+        print("    decorative motion. for the real FFT: brew install")
+        print("    blackhole-2ch, then docs/INSTALL-MACOS.md")
     print()
     if os.path.isfile(AUTH_FILE) and verify_auth():
         print("✓ already signed in")
