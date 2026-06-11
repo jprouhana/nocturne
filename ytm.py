@@ -1012,6 +1012,11 @@ def oauth_login():
 TABS = ["Search", "Library", "Playlists", "Queue"]
 BLOCKS = " ▁▂▃▄▅▆▇█"
 VIZ_STYLES = ["bars", "mirror", "scope", "bands", "drop", "cover"]
+
+# the blackspace family — calm interference waves glowing out of darkness,
+# cheap to compute (a few sines, no log/atan stacks). the eww desktop
+# widget rotates through only these; in the app they join the normal pool
+WAVE_PRESETS = list(range(36, 42))
 BADGE = ["█▙  ", "███▙", "█▛  "]
 LOGO = [
     "█▖ ▗█ ▀▀█▀▀   █▀▄▀█ █   █ ▗█▀▀▀ ▀█▀ ▗█▀▀",
@@ -1084,7 +1089,9 @@ class App:
         self.qpos = -1
         self.now: Track | None = None
 
-        self.repeat = state.get("repeat", False)
+        # 0 = off, 1 = repeat the queue, 2 = loop the current track
+        # (older state files stored a bool — int() maps True → 1)
+        self.repeat = int(state.get("repeat", 0) or 0)
         self.work = state.get("work", False)
         self.viz_style = state.get("viz", "bars")
         if self.viz_style not in VIZ_STYLES:
@@ -1102,7 +1109,7 @@ class App:
         # milkdrop-style preset morphing
         self._drop_preset = random.randrange(self.N_PRESETS)
         self._drop_prev = self._drop_preset
-        self._drop_pa = self._drop_new_params()
+        self._drop_pa = self._drop_new_params(self._drop_preset)
         self._drop_pb = self._drop_pa
         self._drop_mix = 1.0
         self._drop_switch_at = time.time() + random.uniform(12, 24)
@@ -1111,6 +1118,8 @@ class App:
         self._kitty_ok = self._kitty_sniff()
         self._kitty_payload = None
         self._kitty_live = False
+        self._kitty_art_key = None    # url of the cover currently shipped
+        self._kitty_art_live = False
         self._kitty_id = 0
         self.drop_px = int(state.get(
             "drop_px", 1 if state.get("drop_hd") else 0))
@@ -1462,15 +1471,20 @@ class App:
         if not self.authed:
             self.say("liking needs sign-in → ytm --login")
             return
+        trk = self.now
         if self.liked_now:           # L on a liked song = unlike, heartbreak
             self._like_t = time.time()
             self._like_mode = "break"
             self.liked_now = False
+            # the library reflects it instantly; the quiet refresh after
+            # the network call is just the confirm
+            self.lib = [x for x in self.lib if x.video_id != trk.video_id]
+            self.sel[1] = min(self.sel[1], max(len(self.lib) - 1, 0))
 
             def work():
                 try:
-                    self.yt.rate_song(self.now.video_id, "INDIFFERENT")
-                    self.say(f"♡ unliked: {self.now.title}")
+                    self.yt.rate_song(trk.video_id, "INDIFFERENT")
+                    self.say(f"♡ unliked: {trk.title}")
                     if self._lib_fetched:
                         self._lib_refresh()
                 except Exception as e:
@@ -1479,16 +1493,21 @@ class App:
             return
         self._like_t = time.time()   # heart splash, optimistic
         self._like_mode = "like"
+        self.liked_now = True
+        if self._lib_fetched and \
+                all(x.video_id != trk.video_id for x in self.lib):
+            self.lib.insert(0, trk)  # likes land newest-first
 
         def work():
             try:
-                self.yt.rate_song(self.now.video_id, "LIKE")
-                self.liked_now = True
-                self.say(f"♥ liked: {self.now.title}")
+                self.yt.rate_song(trk.video_id, "LIKE")
+                self.say(f"♥ liked: {trk.title}")
                 if self._lib_fetched:
                     self._lib_refresh()
             except Exception as e:
                 self.say(f"like failed: {e}")
+                if self.now and self.now.video_id == trk.video_id:
+                    self.liked_now = False
         threading.Thread(target=work, daemon=True).start()
 
     # ── library write ops ────────────────────────────────────────────────────
@@ -1562,14 +1581,23 @@ class App:
         self.picker_track = lst[i]
 
     def add_to_playlist(self, pl, track):
+        # the visible list (and the splash) reacts NOW — the network call
+        # and the quiet refresh land behind it
+        if pl.playlist_id == "LM":
+            self._like_t = time.time()
+            self._like_mode = "like"
+            if self.now and self.now.video_id == track.video_id:
+                self.liked_now = True
+            if self._lib_fetched and \
+                    all(x.video_id != track.video_id for x in self.lib):
+                self.lib.insert(0, track)
+        elif self.pl_open and self.pl_open.playlist_id == pl.playlist_id:
+            self.pl_tracks.append(track)
+
         def work():
             try:
                 if pl.playlist_id == "LM":      # Liked Music is rate-based
                     self.yt.rate_song(track.video_id, "LIKE")
-                    self._like_t = time.time()
-                    self._like_mode = "like"
-                    if self.now and self.now.video_id == track.video_id:
-                        self.liked_now = True
                 else:
                     self.yt.add_playlist_items(pl.playlist_id,
                                                [track.video_id])
@@ -1593,13 +1621,13 @@ class App:
         self._like_mode = "break"
         if self.now and self.now.video_id == track.video_id:
             self.liked_now = False
+        if track in self.lib:                    # gone from the list NOW
+            self.lib.remove(track)
+        self.sel[1] = min(self.sel[1], max(len(self.lib) - 1, 0))
 
         def work():
             try:
                 self.yt.rate_song(track.video_id, "INDIFFERENT")
-                if track in self.lib:
-                    self.lib.remove(track)
-                self.sel[1] = min(self.sel[1], max(len(self.lib) - 1, 0))
                 self.say(f"♡ unliked: {track.title}")
                 self._lib_refresh()
             except Exception as e:
@@ -1615,6 +1643,9 @@ class App:
             self.say("can't remove this one (not an editable playlist item)")
             return
         pl = self.pl_open
+        if track in self.pl_tracks:              # gone from the list NOW
+            self.pl_tracks.remove(track)
+        self.sel[2] = min(self.sel[2], max(len(self.pl_tracks) - 1, 0))
 
         def work():
             try:
@@ -1622,10 +1653,6 @@ class App:
                     pl.playlist_id,
                     [{"videoId": track.video_id,
                       "setVideoId": track.set_video_id}])
-                if track in self.pl_tracks:
-                    self.pl_tracks.remove(track)
-                self.sel[2] = min(self.sel[2],
-                                  max(len(self.pl_tracks) - 1, 0))
                 self.say(f"✗ removed from {pl.title}: {track.title}")
                 self._pls_fetched = False        # counts changed
                 self._pl_refresh()
@@ -1788,8 +1815,9 @@ class App:
         elif k == "s":
             self.shuffle_queue()
         elif k == "r":
-            self.repeat = not self.repeat
-            self.say(f"repeat {'on' if self.repeat else 'off'}")
+            self.repeat = (self.repeat + 1) % 3
+            self.say(("repeat off", "repeat all",
+                      "loop track")[self.repeat])
         elif k == "v":
             i = VIZ_STYLES.index(self.viz_style)
             self.viz_style = VIZ_STYLES[(i + 1) % len(VIZ_STYLES)]
@@ -2616,20 +2644,26 @@ class App:
             lines.append(crop_pad(" " * pad_l + "".join(cells) + RESET, w))
         return lines
 
-    def _drop_new_params(self):
+    def _drop_new_params(self, preset=None):
         # ~half the rolls knock the origin off-center so radial presets
         # stop staring at the exact middle of the panel every time
         off = random.random() < 0.45
-        return {"k1": random.uniform(2.0, 5.5),
-                "k2": random.uniform(2.0, 8.0),
-                "arms": random.choice([2, 3, 3, 4, 5, 6]),
-                "ph": random.uniform(0, math.tau),
-                "cx": random.uniform(-1.1, 1.1) if off else 0.0,
-                "cy": random.uniform(-0.6, 0.6) if off else 0.0,
-                # post-processing personality: 0 = smooth, n = n sharp
-                # palette bands (milkdrop-style colorful level sets)
-                "band": random.choice([0, 0, 0, 2, 2, 3, 3, 4]),
-                "gam": random.uniform(0.95, 1.45)}
+        p = {"k1": random.uniform(2.0, 5.5),
+             "k2": random.uniform(2.0, 8.0),
+             "arms": random.choice([2, 3, 3, 4, 5, 6]),
+             "ph": random.uniform(0, math.tau),
+             "cx": random.uniform(-1.1, 1.1) if off else 0.0,
+             "cy": random.uniform(-0.6, 0.6) if off else 0.0,
+             # post-processing personality: 0 = smooth, n = n sharp
+             # palette bands (milkdrop-style colorful level sets)
+             "band": random.choice([0, 0, 0, 2, 2, 3, 3, 4]),
+             "gam": random.uniform(0.95, 1.45)}
+        if preset is not None and preset in WAVE_PRESETS:
+            # blackspace family: smooth gradients only — palette banding
+            # would slice the glow into rings — and deeper shadows
+            p["band"] = 0
+            p["gam"] = random.uniform(1.1, 1.35)
+        return p
 
     def _drop_post(self, v, P):
         """Contrast shaping — this is what makes presets pop instead of
@@ -2641,7 +2675,7 @@ class App:
             return 0.5 - 0.5 * np.cos(v * math.tau * P["band"])
         return 0.5 - 0.5 * np.cos(v * math.pi)
 
-    N_PRESETS = 36
+    N_PRESETS = 42
 
     def _drop_field(self, preset, P, xs, ys, r, ang, t, eb, em, et):
         """One milkdrop-ish interference field. Each preset is a different
@@ -2873,11 +2907,52 @@ class App:
                     + sin(q * 3 + t * 0.6)
                     + em * sin(ang * A + t)
                     + et * sin(q * 15 - t * 5))
-        # 35: aurora — curtains of light rippling sideways
-        cur = sin(xs * k1 * 1.1 + sin(ys * 1.6 + t * 0.6) * (2.2 + 2 * eb))
-        return (cur * (1.5 + eb) + sin(ys * 1.8 - t * 0.4)
-                + em * sin(xs * 5 + t * 1.2)
-                + et * 0.9 * sin((xs - ys) * 8 + t * 2.8))
+        if preset == 35:   # aurora — curtains of light rippling sideways
+            cur = sin(xs * k1 * 1.1
+                      + sin(ys * 1.6 + t * 0.6) * (2.2 + 2 * eb))
+            return (cur * (1.5 + eb) + sin(ys * 1.8 - t * 0.4)
+                    + em * sin(xs * 5 + t * 1.2)
+                    + et * 0.9 * sin((xs - ys) * 8 + t * 2.8))
+        # ── the blackspace family (WAVE_PRESETS) ──────────────────────────
+        # calm interference glowing out of darkness: every field here is a
+        # couple of plane/distance waves biased negative, so most of the
+        # panel rests at the bottom of the palette and only the crests
+        # glow. no `ang` anywhere — immune to the branch-cut seam — and
+        # cheap enough for the 5fps desktop widget
+        if preset == 36:   # twin ripples — two soft sources circling slowly
+            ox = 0.8 * math.sin(t * 0.22 + ph)
+            oy = 0.45 * math.cos(t * 0.17)
+            d1 = np.sqrt((xs - ox) ** 2 + (ys - oy) ** 2)
+            d2 = np.sqrt((xs + ox) ** 2 + (ys + oy) ** 2)
+            return (sin(d1 * (3.2 + 3 * eb) - t * 0.9) * 2.5
+                    + sin(d2 * (2.6 + 2 * em) + t * 0.7) * 1.7
+                    - 1.3 + et * 0.5 * sin(d1 * 9 - t * 2))
+        if preset == 37:   # deep swell — slow rollers crossing a dark sea
+            return (sin(xs * (1.8 + eb) - t * 0.6) * 2.4
+                    + sin(xs * 0.9 + ys * 1.6 + t * 0.45) * 1.6
+                    + sin(ys * 2.4 - t * 0.3 + math.sin(t * 0.2) * 2) * 0.9
+                    - 1.25 + em * 0.6 * sin(xs * 4 - t))
+        if preset == 38:   # breathing pond — one ripple source fading out
+            env = 1.0 / (1.0 + r * (1.0 + 0.5 * em))
+            return (sin(r * (4.5 + 4 * eb) - t * 1.1) * 5.5 * env
+                    - 1.2 + et * 0.5 * sin(r * 11 - t * 3))
+        if preset == 39:   # caustic beats — twin ring sets, slow moiré
+            d1 = np.sqrt((xs - 0.55) ** 2 + ys * ys)
+            d2 = np.sqrt((xs + 0.55) ** 2 + ys * ys)
+            return (sin(d1 * (k1 * 0.8 + 2.2) - t * 0.8) * 2.9
+                    + sin(d2 * (k1 * 0.8 + 2.8) + t * 0.65) * 2.0
+                    - 1.8 + eb * 1.2 * sin(r * 2.5 - t)
+                    + et * 0.4 * sin(d2 * 10 - t * 2.5))
+        if preset == 40:   # dune drift — diagonal bands sliding in the dark
+            return (sin((xs * 0.8 + ys * 0.55) * (k1 * 0.6 + 1.2 + eb)
+                        - t * 0.5) * 2.8
+                    + sin((xs - ys) * 1.3 + t * 0.27) * 1.5
+                    - 1.8 + em * 0.5 * sin(xs * 3 + t * 0.8))
+        # 41: ember curtain — aurora bands glowing out of blackness
+        cur = sin(xs * (k1 * 0.4 + 1.0)
+                  + sin(ys * 1.4 + t * 0.5) * (1.8 + 1.5 * eb))
+        return (cur * 2.9 + sin(ys * 1.5 - t * 0.35) * 1.2
+                - 1.8 + et * 0.5 * sin(xs * 6 - t * 1.6))
 
     @staticmethod
     def _kitty_sniff():
@@ -2951,24 +3026,14 @@ class App:
         import numpy as np
         lut = np.clip(self._drop_lut() * bright, 0, 255).astype(np.uint8)
         rgb = lut[idxf.astype(np.intp)]              # (Hpx, Wpx, 3)
-        if getattr(self, "viz_art", 0) and getattr(self, "now", None):
-            # art overlay in pixel mode: bake the cover into the bitmap
-            # at true resolution — half-block glyphs over a kitty image
-            # lose their background halves to the z-order
-            a = self.art.rgb(getattr(self.now, "thumb", ""))
-            if a is not None:
-                side = max(8, int(min(Wpx, Hpx) * 0.62))
-                ai = np.linspace(0, 511, side).astype(int)
-                y0 = (Hpx - side) // 2
-                x0 = (Wpx - side) // 2
-                rgb[y0:y0 + side, x0:x0 + side] = a[ai][:, ai]
+        was_live = getattr(self, "_kitty_live", False)
         data = base64.standard_b64encode(
             zlib.compress(rgb.tobytes(), 1)).decode("ascii")
         new = 91 + (self._kitty_id ^ 1)              # double-buffer ids
         old = 91 + self._kitty_id
         self._kitty_id ^= 1
         head = (f"a=T,i={new},q=2,f=24,o=z,s={Wpx},v={Hpx},"
-                f"c={W},r={rows},z=-1")
+                f"c={W},r={rows},z=-1,C=1")
         out = []
         for o in range(0, len(data), 4096):
             chunk = data[o:o + 4096]
@@ -2976,11 +3041,53 @@ class App:
             out.append(f"\x1b_G{head},m={m};{chunk}\x1b\\" if o == 0
                        else f"\x1b_Gm={m};{chunk}\x1b\\")
         out.append(f"\x1b_Ga=d,d=i,i={old},q=2\x1b\\")
+        out += self._kitty_art(W, rows, was_live)
         self._kitty_payload = "".join(out)
         self._kitty_live = True
         blank = " " * w
         first = " " * pad + KITTY_MARK + " " * (w - pad - 1)
         return [first] + [blank] * (rows - 1)
+
+    def _kitty_art(self, W, rows, was_live):
+        """The t-mode cover in pixel mode: its own kitty image at the
+        art's native resolution, placed over the field. Baking it into
+        the budget-scaled field bitmap smeared it into mush on big
+        panels — this way the terminal scales the 512px source exactly
+        once. Transmitted per track (id 93), re-placed per frame."""
+        on = getattr(self, "viz_art", 0) and getattr(self, "now", None)
+        a = self.art.rgb(getattr(self.now, "thumb", "")) if on else None
+        if a is None:
+            if getattr(self, "_kitty_art_live", False):
+                self._kitty_art_live = False
+                self._kitty_art_key = None
+                return ["\x1b_Ga=d,d=i,i=93,q=2\x1b\\"]
+            return []
+        cw, ch = self._cell_px()
+        side = max(1.0, 0.62 * min(W * cw, rows * ch))
+        ac = max(1, min(W, round(side / cw)))
+        ar = max(1, min(rows, round(side / ch)))
+        out = []
+        url = self.now.thumb
+        if getattr(self, "_kitty_art_key", None) != url or not was_live:
+            # new track (or the screen was wiped): ship the pixels once
+            data = base64.standard_b64encode(
+                zlib.compress(a.tobytes(), 1)).decode("ascii")
+            out.append("\x1b_Ga=d,d=i,i=93,q=2\x1b\\")
+            head = "a=t,i=93,q=2,f=24,o=z,s=512,v=512"
+            for o in range(0, len(data), 4096):
+                chunk = data[o:o + 4096]
+                m = 1 if o + 4096 < len(data) else 0
+                out.append(f"\x1b_G{head},m={m};{chunk}\x1b\\" if o == 0
+                           else f"\x1b_Gm={m};{chunk}\x1b\\")
+            self._kitty_art_key = url
+        # place it centered — relative cursor moves from the panel
+        # origin (the C=1 on the field transmit left the cursor there),
+        # fixed placement id so each frame replaces, never stacks
+        ro, co = (rows - ar) // 2, (W - ac) // 2
+        mv = (f"\x1b[{ro}B" if ro else "") + (f"\x1b[{co}C" if co else "")
+        out.append(mv + f"\x1b_Ga=p,i=93,p=1,q=2,c={ac},r={ar},z=0,C=1\x1b\\")
+        self._kitty_art_live = True
+        return out
 
     def _drop_lut(self):
         """64-entry palette: dark → primary → secondary → accent → white.
@@ -3067,9 +3174,13 @@ class App:
         H = rows * 2
         mode = getattr(self, "drop_px", 0)
         if mode == 2 and (not getattr(self, "_kitty_ok", False)
-                          or getattr(self, "menu", False)
-                          or time.time() - getattr(self, "_like_t", 0) < 1.9):
+                          or getattr(self, "menu", False)):
             mode = 1     # overlays composite into text cells, not bitmaps
+        if mode == 2 and time.time() - getattr(self, "_like_t", 0) < 1.9:
+            # splash frames: the heart composites into text cells too, but
+            # chunky renders several times faster than quadrants — the
+            # animation stays at full frame rate instead of stuttering
+            mode = 0
         # chunky is supersampled 2× because its grid is so coarse that
         # radial cores alias into staircases — averaging 4 subsamples
         # per pixel costs nothing at that size
@@ -3158,9 +3269,10 @@ class App:
         if (now >= self._drop_switch_at or beat) and self._drop_mix >= 1.0:
             self._drop_prev = self._drop_preset
             self._drop_pb = self._drop_pa
+            pool = getattr(self, "_drop_pool", None) or range(self.N_PRESETS)
             self._drop_preset = random.choice(
-                [i for i in range(self.N_PRESETS) if i != self._drop_preset])
-            self._drop_pa = self._drop_new_params()
+                [i for i in pool if i != self._drop_preset])
+            self._drop_pa = self._drop_new_params(self._drop_preset)
             self._drop_mix = 0.0
             self._drop_last_switch = now
             self._drop_switch_at = now + random.uniform(12, 24) / \
@@ -3319,7 +3431,9 @@ class App:
         vbar = (fg(PINK) + "█" * vfill + fg(DGREY) + "░" * (vol_w - vfill) + RESET)
         flags = []
         if self.repeat:
-            flags.append(fg(ORANGE) + "⟲ repeat" + RESET)
+            flags.append(fg(ORANGE)
+                         + ("⟲ repeat" if self.repeat == 1 else "⟳ loop")
+                         + RESET)
         if mute:
             flags.append(fg(RED) + "muted" + RESET)
         qinfo = (f"{self.qpos + 1}/{len(self.queue)}"
@@ -3376,7 +3490,12 @@ class App:
             while self.running:
                 if self.eof_flag.is_set():
                     self.eof_flag.clear()
-                    self.next_track()
+                    # loop track replays on the NATURAL end only —
+                    # pressing n still skips ahead
+                    if self.repeat == 2 and self.now:
+                        self.play_queue(self.qpos)
+                    else:
+                        self.next_track()
                 if self.now and time.time() - self._now_wt > 2:
                     self._now_wt = time.time()
                     self._write_now()
@@ -3399,6 +3518,11 @@ class App:
                     tick = 0.04
                 else:
                     tick = 0.12
+                # a heart splash is alive: full frame rate no matter what
+                # was on screen (unliking from a list while idle would
+                # otherwise animate at the lazy 8fps idle tick)
+                if time.time() - self._like_t < 1.9:
+                    tick = min(tick, 0.008)
                 # while keys are streaming (held scroll), outpace the
                 # keyboard repeat rate so every frame handles exactly one
                 # key — smooth motion AND nothing left to backlog
@@ -3520,9 +3644,11 @@ def eww_stream(spec, style, fps, theme_name, frame_title=None):
     v._drop_last = time.time()
     v._drop_e = [0.0, 0.0, 0.0]
     v._drop_lut_cache = None
-    v._drop_preset = random.randrange(App.N_PRESETS)
+    # the widget lives on the blackspace waves — calm, cheap, lots of dark
+    v._drop_pool = WAVE_PRESETS
+    v._drop_preset = random.choice(WAVE_PRESETS)
     v._drop_prev = v._drop_preset
-    v._drop_pa = v._drop_new_params()
+    v._drop_pa = v._drop_new_params(v._drop_preset)
     v._drop_pb = v._drop_pa
     v._drop_mix = 1.0
     v._drop_switch_at = time.time() + random.uniform(12, 24)
