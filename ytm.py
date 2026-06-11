@@ -367,9 +367,10 @@ def _sc_client_id():
 
 def _sc_get(url, token, method="GET"):
     import urllib.request
-    req = urllib.request.Request(url, method=method, headers={
-        "User-Agent": "Mozilla/5.0",
-        "Authorization": f"OAuth {token}"})
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if token:
+        headers["Authorization"] = f"OAuth {token}"
+    req = urllib.request.Request(url, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=15) as r:
         body = r.read()
     return json.loads(body) if body.strip() else {}
@@ -392,10 +393,25 @@ def _sc_track_of(tr):
                  thumb=tr.get("artwork_url") or "")
 
 
+def _sc_uid(token):
+    try:
+        with open(SC_FILE) as f:
+            uid = json.load(f).get("user_id") or 0
+    except Exception:
+        uid = 0
+    if not uid:
+        _, uid = sc_me(token)
+    return uid
+
+
 def sc_likes(token, n=200):
-    """Your soundcloud likes, newest first."""
+    """Your soundcloud likes, newest first. NOTE: the endpoint is
+    /users/{id}/track_likes — /me/track_likes 404s on api-v2."""
     cid = _sc_client_id()
-    url = (f"https://api-v2.soundcloud.com/me/track_likes"
+    uid = _sc_uid(token)
+    if not uid:
+        return []
+    url = (f"https://api-v2.soundcloud.com/users/{uid}/track_likes"
            f"?client_id={cid}&limit=100")
     out = []
     try:
@@ -413,6 +429,57 @@ def sc_likes(token, n=200):
     return out[:n]
 
 
+def sc_playlists(token, n=100):
+    """Everything on your soundcloud library shelf — your sets and the
+    ones you've liked. /me/library/all is the endpoint that exists;
+    /me/playlists 404s."""
+    cid = _sc_client_id()
+    url = (f"https://api-v2.soundcloud.com/me/library/all"
+           f"?client_id={cid}&limit=50")
+    out = []
+    try:
+        while url and len(out) < n:
+            d = _sc_get(url, token)
+            for it in d.get("collection") or []:
+                pl = it.get("playlist") or it.get("system_playlist") or {}
+                u = pl.get("permalink_url") or ""
+                if u:
+                    out.append(Playlist(u, pl.get("title") or "?",
+                                        str(pl.get("track_count") or "")))
+            nxt = d.get("next_href")
+            url = (nxt + ("&" if "?" in nxt else "?")
+                   + f"client_id={cid}") if nxt else None
+    except Exception:
+        pass
+    return out[:n]
+
+
+def sc_playlist_tracks(pl, n=500):
+    """Open a soundcloud set via api-v2: resolve hydrates the first few
+    tracks, the rest arrive as id-stubs that /tracks?ids= fills in (50
+    per call). Full metadata, 2-3 round trips for a 100-track set. No
+    DRM probe — a locked track just auto-skips at play time."""
+    import urllib.parse
+    token = sc_token()
+    cid = _sc_client_id()
+    try:
+        d = _sc_get("https://api-v2.soundcloud.com/resolve?url="
+                    + urllib.parse.quote(pl.playlist_id, safe="")
+                    + f"&client_id={cid}", token)
+        raw = (d.get("tracks") or [])[:n]
+        full = {t["id"]: t for t in raw if t.get("permalink_url")}
+        missing = [str(t["id"]) for t in raw if not t.get("permalink_url")]
+        for i in range(0, len(missing), 50):
+            chunk = ",".join(missing[i:i + 50])
+            for t in _sc_get("https://api-v2.soundcloud.com/tracks"
+                             f"?ids={chunk}&client_id={cid}", token):
+                full[t["id"]] = t
+        return [_sc_track_of(full[t["id"]]) for t in raw
+                if full.get(t["id"], {}).get("permalink_url")]
+    except Exception:
+        return []
+
+
 def sc_like(track, on=True):
     """Like/unlike on the soundcloud side: resolve the permalink to a
     track id, then PUT/DELETE the like."""
@@ -422,14 +489,7 @@ def sc_like(track, on=True):
     try:
         import urllib.parse
         cid = _sc_client_id()
-        uid = 0
-        try:
-            with open(SC_FILE) as f:
-                uid = json.load(f).get("user_id") or 0
-        except Exception:
-            pass
-        if not uid:
-            _, uid = sc_me(token)
+        uid = _sc_uid(token)
         tr = _sc_get("https://api-v2.soundcloud.com/resolve?url="
                      + urllib.parse.quote(track.video_id, safe="")
                      + f"&client_id={cid}", token)
@@ -2224,22 +2284,30 @@ class App:
         if self._pls_fetched:
             return
         self._pls_fetched = True
-        if not self.authed:
+        sct = sc_token()
+        if not self.authed and not sct:
             self.say("playlists need sign-in → quit and run: ytm --login")
             return
         self.loading_msg = "loading playlists…"
 
         def work():
             try:
-                items = self._lib_call(
-                    lambda: self.yt.get_library_playlists(limit=50))
-                if not items and self._auth_refresh():
-                    # signed-out responses come back empty, not as errors
-                    items = self.yt.get_library_playlists(limit=50)
-                self.playlists = [
-                    Playlist(p["playlistId"], p.get("title", "?"),
-                             str(p.get("count", "")))
-                    for p in items]
+                yt_part = []
+                if self.authed:
+                    items = self._lib_call(
+                        lambda: self.yt.get_library_playlists(limit=50))
+                    if not items and self._auth_refresh():
+                        # signed-out responses come back empty, not errors
+                        items = self.yt.get_library_playlists(limit=50)
+                    yt_part = [
+                        Playlist(p["playlistId"], p.get("title", "?"),
+                                 str(p.get("count", "")))
+                        for p in items]
+                sc_part = sc_playlists(sct) if sct else []
+                self.playlists = yt_part + sc_part
+                if sc_part:
+                    self.say(f"{len(yt_part)} playlists "
+                             f"+ {len(sc_part)} ☁")
             except Exception as e:
                 self._pls_fetched = False
                 self.say(f"playlists failed: {e}")
@@ -2252,11 +2320,15 @@ class App:
 
         def work():
             try:
-                data = self._lib_call(
-                    lambda: self.yt.get_playlist(pl.playlist_id, limit=300))
-                self.pl_tracks = [Track.from_item(t)
-                                  for t in data.get("tracks", [])
-                                  if t and t.get("videoId")]
+                if pl.playlist_id.startswith("http"):   # ☁ set
+                    self.pl_tracks = sc_playlist_tracks(pl)
+                else:
+                    data = self._lib_call(
+                        lambda: self.yt.get_playlist(pl.playlist_id,
+                                                     limit=300))
+                    self.pl_tracks = [Track.from_item(t)
+                                      for t in data.get("tracks", [])
+                                      if t and t.get("videoId")]
                 self.pl_open = pl
                 self.sel[2] = 0
                 self.scroll[2] = 0
@@ -2487,8 +2559,8 @@ class App:
     def _pl_refresh(self):
         """Quietly re-pull the open playlist so it tracks reality."""
         pl = self.pl_open
-        if not (self.authed and pl):
-            return
+        if not (self.authed and pl) or pl.playlist_id.startswith("http"):
+            return                       # ☁ sets refresh on reopen only
 
         def work():
             try:
@@ -2559,6 +2631,9 @@ class App:
         self.picker_track = lst[i]
 
     def add_to_playlist(self, pl, track):
+        if pl.playlist_id.startswith("http"):
+            self.say("☁ soundcloud sets are read-only here (for now)")
+            return
         # the visible list (and the splash) reacts NOW — the network call
         # and the quiet refresh land behind it
         if pl.playlist_id == "LM":
@@ -2652,6 +2727,9 @@ class App:
             return
         if pl.playlist_id == "LM":
             self.say("can't delete Liked Music")
+            return
+        if pl.playlist_id.startswith("http"):
+            self.say("☁ soundcloud sets are read-only here (for now)")
             return
         name, t0 = self._confirm_del
         if name == pl.playlist_id and time.time() - t0 < 3:
@@ -3098,7 +3176,8 @@ class App:
             it = lst[i]
             is_sel = (i == sel)
             if isinstance(it, Playlist):
-                line = (f" {fg(ORANGE)}▤ {RESET}{fg(WHITE)}{it.title}"
+                pic = ("☁ " if it.playlist_id.startswith("http") else "▤ ")
+                line = (f" {fg(ORANGE)}{pic}{RESET}{fg(WHITE)}{it.title}"
                         f"{RESET} {fg(GREY)}{DIM}{it.count}{RESET}")
             else:
                 playing = (self.now and self.tab == 3 and i == self.qpos)
