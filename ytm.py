@@ -3621,6 +3621,20 @@ def doctor():
     return ok
 
 
+def version_string():
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        r = subprocess.run(
+            ["git", "-C", here, "log", "-1", "--format=%h %cs"],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            sha, date = r.stdout.split()
+            return f"ytm {sha} ({date})"
+    except Exception:
+        pass
+    return "ytm (unknown build — not a git checkout)"
+
+
 def self_update():
     """ytm update — pull the latest code and refresh the fragile deps."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -3638,7 +3652,7 @@ def self_update():
     print("→ refreshing yt-dlp + ytmusicapi (stale yt-dlp = broken playback)")
     subprocess.run([sys.executable, "-m", "pip", "install", "-q",
                     "--upgrade", "yt-dlp", "ytmusicapi"], check=False)
-    print("✓ up to date — restart ytm")
+    print("✓ up to date — restart ytm   [" + version_string() + "]")
     return True
 
 
@@ -3768,6 +3782,8 @@ def main():
     ap.add_argument("--auth-browser", metavar="NAME",
                     help="import session from a browser non-interactively "
                          "(chrome, brave, edge, chromium, vivaldi, opera)")
+    ap.add_argument("--version", action="store_true",
+                    help="print the installed version (git commit) and exit")
     ap.add_argument("--doctor", action="store_true", help="check dependencies")
     ap.add_argument("--eww", metavar="WxH",
                     help="stream visualizer frames as pango markup for an "
@@ -3783,6 +3799,9 @@ def main():
     ap.add_argument("--ao", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
 
+    if args.version:
+        print(version_string())
+        sys.exit(0)
     if args.cmd == "setup" or args.setup:
         sys.exit(0 if setup_wizard() else 1)
     if args.cmd == "update":
