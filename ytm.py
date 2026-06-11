@@ -1452,6 +1452,23 @@ class App:
                 self.queue.append(lst[i])
                 self.say(f"+ queued: {lst[i].title}")
 
+    def start_mix(self):
+        """R = make a mix out of the selected track, wherever it is —
+        play it and let its radio fill the queue, then show the queue."""
+        lst = self.current_list()
+        i = self.sel[self.tab]
+        in_tracks = self.tab in (0, 1, 3) or (self.tab == 2 and self.pl_open)
+        if not (in_tracks and lst and 0 <= i < len(lst)) or \
+                isinstance(lst[i], Playlist):
+            return
+        track = lst[i]
+        self.queue = [track]
+        self.play_queue(0)
+        self.start_radio(track)
+        self.tab = 3              # watch the mix build, hearts and all
+        self.sel[3] = 0
+        self.say(f"✦ mix from: {track.title}")
+
     def _fetch_like_state(self, vid):
         """The header ♥ (and the L toggle) should know whether the track
         is already liked, not just whether it was liked this session."""
@@ -1812,6 +1829,8 @@ class App:
             self.add_to_queue()
         elif k == "L":
             self.like_current()
+        elif k == "R":
+            self.start_mix()
         elif k == "s":
             self.shuffle_queue()
         elif k == "r":
@@ -2045,7 +2064,7 @@ class App:
                 0: "press / to search",
                 1: "your liked songs live here",
                 2: "your playlists live here",
-                3: "queue is empty — play something",
+                3: "queue is empty — R makes a mix of any song",
             }[self.tab if not (self.tab == 2 and self.pl_open) else 2]
             for i in range(rows):
                 out.append(crop_pad(
@@ -2065,18 +2084,42 @@ class App:
                         f"{RESET} {fg(GREY)}{DIM}{it.count}{RESET}")
             else:
                 playing = (self.now and self.tab == 3 and i == self.qpos)
-                mark = fg(RED) + "▶ " + RESET if playing else "  "
+                if self.tab == 3:
+                    # the queue speaks Undertale: the playing track is a
+                    # beating soul, history is hollow and faded, what's
+                    # coming waits as dim hearts down the path
+                    if playing:
+                        hc = lerp(RED, PINK,
+                                  0.5 + 0.5 * math.sin(time.time() * 6))
+                        mark = fg(hc) + "♥ " + RESET
+                    elif i < self.qpos:
+                        mark = fg(DGREY) + "♡ " + RESET
+                    else:
+                        mark = fg(lerp(DARK, RED, 0.55)) + "♡ " + RESET
+                else:
+                    mark = fg(RED) + "▶ " + RESET if playing else "  "
+                faded = self.tab == 3 and i < self.qpos and not playing
+                tcol = DGREY if faded else WHITE
                 dur = it.duration or ""
                 tw = w - 4 - len(dur) - 2
                 t = it.title[:max(tw - len(it.artist) - 3, 8)]
-                line = (f" {mark}{fg(WHITE)}{t}{RESET} "
+                line = (f" {mark}{fg(tcol)}{t}{RESET} "
                         f"{fg(GREY)}{DIM}{it.artist}{RESET}")
                 pad = w - visible_len(line) - len(dur) - 2
                 line += " " * max(pad, 1) + fg(DGREY) + dur + RESET
             if is_sel:
                 plain = ANSI_RE.sub("", line)
-                line = bg(lerp(DARK, RED, 0.18)) + fg(WHITE) + BOLD + crop_pad(
-                    " " + fg(RED) + "▌" + fg(WHITE) + plain[1:], w)
+                if self.tab == 3 and not isinstance(it, Playlist):
+                    # the selection cursor IS the soul, like the menus
+                    hc = lerp(RED, PINK,
+                              0.5 + 0.5 * math.sin(time.time() * 6))
+                    line = bg(lerp(DARK, RED, 0.18)) + fg(WHITE) + BOLD + \
+                        crop_pad(" " + fg(hc) + "♥" + fg(WHITE)
+                                 + plain[2:], w)
+                else:
+                    line = bg(lerp(DARK, RED, 0.18)) + fg(WHITE) + BOLD + \
+                        crop_pad(" " + fg(RED) + "▌" + fg(WHITE)
+                                 + plain[1:], w)
             out.append(crop_pad(line, w))
         return out
 
@@ -3457,7 +3500,7 @@ class App:
                     ("w", "work"), ("±", "vol"), ("q", "quit")]
         else:
             keys = [("/", "find"), ("↵", "play"), ("spc", "pause"),
-                    ("n/b", "skip"), ("q", "quit"), ("f", "full"),
+                    ("n/b", "skip"), ("R", "mix"), ("q", "quit"), ("f", "full"),
                     ("F", "max viz"), ("M", "tune"), ("v", "viz"),
                     ("c", "theme"), ("w", "work"),
                     ("a", "+queue"), ("A", "→playlist"), ("N", "new pl"),
