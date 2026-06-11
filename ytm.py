@@ -1349,6 +1349,584 @@ BRAILLE = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]]
 QUADS = " ▗▖▄▝▐▞▟▘▚▌▙▀▜▛█"
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# blackspace — the hidden floor (type "wolfenstein" in the search bar)
+# ──────────────────────────────────────────────────────────────────────────────
+
+WOLF_MAP = [
+    "111111111111111111111111",
+    "1......1......2........1",
+    "1.331..1.2222.2..33.33.1",
+    "1.3....1.2..2....3...3.1",
+    "1.3..1...2..2.2..3.1.3.1",
+    "1....1.1......2....1...1",
+    "1.1111.1222222211111.111",
+    "1......................1",
+    "1.22.1111.3333.1111.22.1",
+    "1.2............1.......1",
+    "1.2..1..313..........2.1",
+    "1....1..3.3...1..1...2.1",
+    "1.11.1..313...1..1.....1",
+    "1......................1",
+    "1.331.2222.11.2222.133.1",
+    "1.3.................3..1",
+    "1...1.1.33333.1.1......1",
+    "1.1...1.3...3.1...1.11.1",
+    "1.1.1.1.3.3.3.1.1.1....1",
+    "1.....1.....3.....1.1..1",
+    "1.111.3333333.111......1",
+    "1..............1...2...1",
+    "1.2..1...11...1..3.....1",
+    "111111111111111111111111",
+]
+
+
+class Blackspace:
+    """A wolfenstein-style raycaster wearing the drop visualizer's skin.
+
+    Easter egg, on purpose: typing "wolfenstein" into the search bar
+    drops you in (nothing in the help screen mentions it). Walls and
+    floor are the blackspace field recipe; the enemies — and your
+    weapon — are the like-splash heart, burning in the complement
+    color. Music keeps playing: the same groove signals that drive the
+    drop viz surge the world here, so the room breathes with the song.
+    Esc wakes you up, back in the player where you left it.
+
+    Deliberately self-contained: it reads the App's audio drive signals
+    and nothing else, and only _wolf_start / handle_key / render / run
+    know it exists. Looking dead from the feature list is the point —
+    it is not dead code."""
+
+    HOLD = 0.24          # key-held window refreshed by terminal autorepeat
+
+    def __init__(self):
+        import numpy as np
+        self.np = np
+        self.grid = np.array(
+            [[{"1": 1, "2": 2, "3": 3}.get(c, 0) for c in row.ljust(24, ".")]
+             for row in WOLF_MAP], dtype=np.int8)
+        self.grid[1:4, 1:4] = 0          # the start room stays open
+        self._reset()
+
+    def _reset(self):
+        self.px, self.py, self.ang = 2.5, 2.5, 0.8
+        self.hp, self.wave, self.kills = 5, 0, 0
+        self.dead = False
+        self.enemies = []
+        self.held = {}
+        self.tt = 0.0
+        self.pulse = self.pulse_s = self.heat = 0.0
+        self.cool = self.muzzle = self.recoil = 0.0
+        self.iframe = self.hurt = 0.0
+        self.bob_t = self.bob_amt = 0.0
+        self.wave_timer = 0.0
+        self.wpn_death = -1.0
+        self.msg_text, self.msg_t = "", 0.0
+        self.fcur, self.fnxt = self._roll(), self._roll()
+        self.morph_t, self.hold_t = 99.0, random.uniform(12, 24)
+        self.zbuf = None
+        self.lut = None
+        self._cam = (1.0, 0.0, 0.0, 0.66)
+        self.last = time.perf_counter()
+        self._spawn()
+        self._say("the blackspace is restless. wasd moves, arrows turn, "
+                  "space sends fire.")
+
+    # ── tiny helpers ─────────────────────────────────────────────────────
+    def _say(self, t, dur=4.5):
+        self.msg_text, self.msg_t = t, dur
+
+    def _solid(self, x, y):
+        if x < 0 or y < 0 or x >= 24 or y >= 24:
+            return True
+        return self.grid[int(y), int(x)] > 0
+
+    def _solid_area(self, x, y, r):
+        return (self._solid(x - r, y - r) or self._solid(x + r, y - r) or
+                self._solid(x - r, y + r) or self._solid(x + r, y + r))
+
+    def _roll(self):
+        # floor params: caustic-beat wavenumber offset, origin knocked
+        # off-center 45% of the time
+        off = (lambda: random.uniform(-5, 5) if random.random() < 0.45
+               else 0.0)
+        k1 = random.uniform(2.2, 3.2)
+        return {"ox": 12 + off(), "oy": 12 + off(),
+                "r1": random.uniform(3, 5.5), "r2": random.uniform(2, 4.5),
+                "o1": random.uniform(0.17, 0.26),
+                "o2": random.uniform(0.15, 0.25),
+                "k1": k1, "k2": k1 + 0.6,
+                "a1": random.uniform(2.5, 2.9), "a2": random.uniform(1.5, 2.0),
+                "bias": -random.uniform(1.3, 1.8)}
+
+    def _eff(self):
+        if self.morph_t >= 2.5:
+            return self.fcur
+        m = self.morph_t / 2.5
+        m = m * m * (3 - 2 * m)
+        return {k: self.fcur[k] + (self.fnxt[k] - self.fcur[k]) * m
+                for k in self.fcur}
+
+    def _spawn(self):
+        self.wave += 1
+        placed, guard = 0, 0
+        while placed < 3 + self.wave and guard < 2000:
+            guard += 1
+            x, y = random.uniform(1.5, 22.5), random.uniform(1.5, 22.5)
+            if (math.hypot(x - self.px, y - self.py) > 7
+                    and not self._solid_area(x, y, 0.4)):
+                self.enemies.append({
+                    "x": x, "y": y, "hp": 2, "alive": True,
+                    "dying": False, "dt": 0.0,
+                    "phase": random.uniform(0, 6.28),
+                    "seed": random.uniform(0, 6.28),
+                    "spd": 0.9 + self.wave * 0.07})
+                placed += 1
+        self.hp = min(5, self.hp + 2)
+        if self.wave > 1:
+            self._say(f"wave {self.wave}. stay determined.")
+
+    # ── input ────────────────────────────────────────────────────────────
+    def key(self, k):
+        now = time.time()
+        if k in ("w", "a", "s", "d", "UP", "DOWN", "LEFT", "RIGHT"):
+            self.held[k] = now + self.HOLD
+        elif k == " ":
+            self.held["fire"] = now + 0.18
+        elif k in ("r", "R") and self.dead:
+            self._reset()
+
+    def _held(self, k):
+        return self.held.get(k, 0.0) > time.time()
+
+    # ── simulation ───────────────────────────────────────────────────────
+    def _shoot(self):
+        if self.cool > 0 or self.zbuf is None:
+            return
+        self.cool, self.muzzle, self.recoil = 0.18, 1.0, 1.0
+        self.pulse = min(1.0, self.pulse + 0.7)
+        self.heat += 0.12
+        dirx, diry, plx, ply = self._cam
+        inv = 1.0 / (plx * diry - dirx * ply)
+        best, bd = None, 1e9
+        w = len(self.zbuf)
+        for e in self.enemies:
+            if not e["alive"]:
+                continue
+            rx, ry = e["x"] - self.px, e["y"] - self.py
+            trx = inv * (diry * rx - dirx * ry)
+            try_ = inv * (-ply * rx + plx * ry)
+            if try_ < 0.2 or abs(trx) > 0.36:
+                continue
+            col = min(w - 1, max(0, int((w / 2) * (1 + trx / try_))))
+            if try_ > self.zbuf[col] + 0.4:      # a wall blocks the shot
+                continue
+            if try_ < bd:
+                bd, best = try_, e
+        if best is None:
+            return
+        best["hp"] -= 1
+        self.heat += 0.2
+        d = math.hypot(best["x"] - self.px, best["y"] - self.py) or 1.0
+        kx = best["x"] + (best["x"] - self.px) / d * 0.35
+        ky = best["y"] + (best["y"] - self.py) / d * 0.35
+        if not self._solid_area(kx, ky, 0.28):
+            best["x"], best["y"] = kx, ky
+        if best["hp"] <= 0:
+            best["alive"], best["dying"] = False, True
+            self.kills += 1
+            self.pulse, self.heat = 1.0, self.heat + 0.35
+
+    def _update(self, dt):
+        self.cool = max(0.0, self.cool - dt)
+        self.muzzle *= math.exp(-dt * 7)
+        self.recoil *= math.exp(-dt * 9)
+        self.iframe = max(0.0, self.iframe - dt)
+        self.hurt *= math.exp(-dt * 4)
+        if self.msg_t > 0:
+            self.msg_t -= dt
+        if self.morph_t < 2.5:
+            self.morph_t += dt
+            if self.morph_t >= 2.5:
+                self.fcur, self.hold_t = self.fnxt, random.uniform(12, 24)
+        else:
+            self.hold_t -= dt
+            if self.hold_t <= 0:
+                self.fnxt, self.morph_t = self._roll(), 0.0
+
+        if self.dead:
+            self.wpn_death += dt
+            return
+        if self._held("fire"):
+            self._shoot()
+
+        # movement: autorepeat-held keys, axis-separated wall sliding
+        sp, r = 3.0 * dt, 0.22
+        ca, sa = math.cos(self.ang), math.sin(self.ang)
+        mx = my = 0.0
+        if self._held("w") or self._held("UP"):
+            mx += ca; my += sa
+        if self._held("s") or self._held("DOWN"):
+            mx -= ca; my -= sa
+        if self._held("a"):
+            mx += sa; my -= ca
+        if self._held("d"):
+            mx -= sa; my += ca
+        if self._held("LEFT"):
+            self.ang -= 2.9 * dt
+        if self._held("RIGHT"):
+            self.ang += 2.9 * dt
+        ml = math.hypot(mx, my)
+        if ml > 0:
+            mx, my = mx / ml * sp, my / ml * sp
+            if not self._solid_area(self.px + mx, self.py, r):
+                self.px += mx
+            if not self._solid_area(self.px, self.py + my, r):
+                self.py += my
+            self.bob_t += dt * 9
+            self.bob_amt = min(1.0, self.bob_amt + dt * 6)
+        else:
+            self.bob_amt = max(0.0, self.bob_amt - dt * 4)
+
+        # hearts drift toward you with a sine wander
+        alive = 0
+        for e in self.enemies[:]:
+            if e["dying"]:
+                e["dt"] += dt
+                if e["dt"] > 1.5:
+                    self.enemies.remove(e)
+                continue
+            if not e["alive"]:
+                continue
+            alive += 1
+            dx, dy = self.px - e["x"], self.py - e["y"]
+            d = math.hypot(dx, dy) or 1.0
+            if d > 0.45:
+                wob = math.sin(self.tt * 1.3 + e["phase"]) * 0.55
+                vx = dx / d - dy / d * wob
+                vy = dy / d + dx / d * wob
+                vl = math.hypot(vx, vy) or 1.0
+                vx, vy = vx / vl * e["spd"] * dt, vy / vl * e["spd"] * dt
+                if not self._solid_area(e["x"] + vx, e["y"], 0.28):
+                    e["x"] += vx
+                if not self._solid_area(e["x"], e["y"] + vy, 0.28):
+                    e["y"] += vy
+            if d < 0.55 and self.iframe <= 0:
+                self.hp -= 1
+                self.iframe, self.hurt, self.pulse = 1.2, 1.0, 1.0
+                self.heat += 0.5
+                if self.hp <= 0:
+                    self.dead, self.wpn_death = True, 0.0
+                    self._say("you cannot give up just yet.   [r]", 9999)
+        if alive == 0:
+            self.wave_timer += dt
+            if self.wave_timer > 2.0:
+                self.wave_timer = 0.0
+                self._spawn()
+        else:
+            self.wave_timer = 0.0
+
+    # ── field math (the blackspace plane-wave family — no atan2) ─────────
+    def _wall_raw(self, wt, u, vy, t):
+        np = self.np
+        if wt == 1:          # ember curtain
+            return (2.7 * np.sin(u * 2.6 + np.sin(vy * 1.4 + 0.5 * t) * 2.2)
+                    + 1.7 * np.sin(vy * 2.2 - 0.7 * t) - 1.5)
+        if wt == 2:          # deep swell
+            return (2.6 * np.sin(u * 2.9 - 0.55 * t + 2 * math.sin(0.2 * t))
+                    + 1.6 * np.sin(u * 1.05 + vy * 0.7 + 0.4 * t)
+                    + 0.8 * np.sin(vy * 2.8 + 0.31 * t) - 1.7)
+        return (2.8 * np.sin((0.8 * u + 0.55 * vy) * 1.6 - 0.42 * t)
+                + 1.8 * np.sin((0.8 * u - 0.6 * vy) * 1.35 + 0.36 * t) - 1.5)
+
+    def _ensure_lut(self):
+        # 64 entries, post curve (contrast → gamma → cosine S) baked in,
+        # built from the live theme so matrix gets a green dungeon
+        if self.lut is not None:
+            return
+        stops = [(8, 8, 14), lerp((8, 8, 14), RED, 0.45), RED,
+                 ORANGE, PINK, lerp(PINK, WHITE, 0.55)]
+        pos = [0.0, 0.34, 0.60, 0.80, 0.94, 1.0]
+        lut = []
+        for i in range(64):
+            v = i / 63
+            v = min(1.0, max(0.0, (v - 0.5) * 1.25 + 0.5)) ** 1.2
+            v = 0.5 - 0.5 * math.cos(v * math.pi)
+            a = max(j for j in range(len(pos) - 1) if pos[j] <= v)
+            f = (v - pos[a]) / (pos[a + 1] - pos[a])
+            lut.append(lerp(stops[a], stops[a + 1], f))
+        self.lut = lut
+        self._fgs = [f"\x1b[38;2;{c[0]};{c[1]};{c[2]}m" for c in lut]
+        self._bgs = [f"\x1b[48;2;{c[0]};{c[1]};{c[2]}m" for c in lut]
+
+    # ── the heart: silhouette math stamped into the index grid ──────────
+    def _draw_heart(self, idx, W, H, cx, cy, scale, o, depth, ex):
+        np = self.np
+        x0 = max(0, int(cx - 1.45 * scale))
+        x1 = min(W - 1, int(cx + 1.45 * scale))
+        ytop = 1.2 + 0.95 * o.get("boost", 1.0) if o.get("flame") else 1.2
+        y0 = max(0, int(cy - ytop * scale))
+        y1 = min(H - 1, int(cy + 1.12 * scale))
+        if x1 <= x0 or y1 <= y0:
+            return
+        hx = (np.arange(x0, x1 + 1) - cx) / scale
+        hy = (cy - np.arange(y0, y1 + 1)) / scale
+        x, y = np.meshgrid(hx, hy)
+        ok = np.ones(x.shape, bool)
+        if depth > 0 and self.zbuf is not None:
+            ok &= (self.zbuf[x0:x1 + 1] > depth)[None, :]
+        rate, desat = 9.0, 0.0
+        if o.get("dying"):
+            dT = o["dt"]
+            rate = 34.0                                   # panic flutter
+            split = max(0.0, dT - 0.3) * 0.55
+            y = y + max(0.0, dT - 0.3) ** 2 * 1.1         # halves sink
+            desat = min(1.0, max(0.0, (dT - 0.2))) * 0.85
+            c = 0.07 * np.sin(y * 8.5 + o["seed"])        # jagged crack
+            ok &= np.abs(x - c) >= 0.045 + split
+            x = x - np.sign(x - c) * split
+        ax = np.abs(x)
+        dxc, dyc = ax - 0.58, y - 0.52
+        # two circles + a straight-edged wedge tapering to a tip at y=-1
+        inside = ok & ((dxc * dxc + dyc * dyc < 0.39) |
+                       ((y <= 0.52) & (y >= -1.0) &
+                        (ax <= 1.2 * (y + 1.0) / 1.52)))
+        pl = 0.5 + 0.5 * math.sin(rate * self.tt + o.get("phase", 0.0))
+        col = lerp(RED, PINK, pl)
+        if desat > 0:
+            g = sum(col) // 3
+            col = lerp(col, (g, g, g), desat)
+        sub = idx[y0:y1 + 1, x0:x1 + 1]
+        sub[inside] = ex(col)
+        if not o.get("flame") or (o.get("dying") and o["dt"] > 0.35):
+            return
+        # fire in the complement, off the crown
+        crown = 0.52 + np.sqrt(np.maximum(0.0, 0.39 - dxc * dxc))
+        rel = y - crown
+        fl = ok & ~inside & (ax < 1.18) & (y >= 0.52) & (rel > 0)
+        t = self.tt
+        ph = o.get("phase", 0.0)
+        n1 = np.sin(x * 7.3 + t * 9.1 + ph)
+        n2 = np.sin(x * 3.1 - t * 6.7)
+        n3 = np.sin(x * 11 + t * 13 + ph)
+        tongue = (np.maximum(0.0, n1 * n2 * 0.7 + n3 * 0.3)
+                  * 0.85 * o.get("boost", 1.0))
+        comp = (255 - col[0], 255 - col[1], 255 - col[2])
+        core = lerp(comp, (255, 255, 255), 0.55)
+        burn = fl & (rel < tongue)
+        burn &= ~((rel > tongue * 0.78) &
+                  (np.sin(t * 21 + x * 5) < 0))           # tips blink off
+        sub[burn] = ex(comp)
+        sub[burn & (rel < tongue * 0.45)] = ex(core)
+        sparks = (fl & (n3 > 0.9) & (rel >= tongue) & (rel < tongue + 0.3) &
+                  (np.abs(np.sin(x * 43 + t * 27)) > 0.93))
+        sub[sparks] = ex(comp)                            # detached sparks
+
+    # ── one frame: returns h terminal lines, last one is the dialogue ───
+    def frame(self, w, h, app=None):
+        np = self.np
+        now = time.perf_counter()
+        dt = min(0.05, now - self.last)
+        self.last = now
+
+        # drink the same groove signals as the drop viz — the world
+        # surges on the music's kicks on top of the gameplay pulses
+        mpulse = en = tre = 0.0
+        if app is not None:
+            try:
+                if (bool(app.player.props.get("pause"))
+                        or app.player.loading):
+                    raw = (0.0, 0.0, 0.0)
+                elif app.tap and app.tap.producing:
+                    lv = app.tap.levels(18)
+                    raw = (sum(lv[:5]) / 5, sum(lv[5:12]) / 7,
+                           sum(lv[12:]) / 6)
+                else:
+                    raw = (0.0, 0.0, 0.0)
+                for i, v in enumerate(raw):
+                    e = app._drop_e[i]
+                    kk = min(1.0, (10.0 if v > e else 2.4) * dt)
+                    app._drop_e[i] = e + (v - e) * kk
+                mpulse, en, _, _, _ = app._drop_groove(raw, dt, time.time())
+                tre = getattr(app, "_tre_pulse", 0.0)
+            except Exception:
+                pass
+
+        # motion rules: eased pulse attack, energy bed, musical time
+        self.pulse *= math.exp(-dt * 3.5)
+        p = min(1.2, max(self.pulse, mpulse))
+        self.pulse_s += (p - self.pulse_s) * min(1.0, dt * 16)
+        self.heat = min(1.0, self.heat * math.exp(-dt * 0.45))
+        energy = min(1.0, 0.15 + max(self.heat, en * 0.8))
+        self.tt += dt * (0.55 + 1.1 * energy + 1.6 * self.pulse_s)
+        self._update(dt)
+
+        W, rows = w, h - 1
+        H = rows * 2
+        self._ensure_lut()
+        idx = np.zeros((H, W), np.int16)
+        extras, emap = [], {}
+
+        def ex(c):
+            c = (int(c[0]), int(c[1]), int(c[2]))
+            i = emap.get(c)
+            if i is None:
+                i = 64 + len(extras)
+                emap[c] = i
+                extras.append(c)
+            return i
+
+        # camera: FOV swells on the pulse; horizon rides the walk bob
+        aspect = min(1.6, max(0.5, (W / max(H, 1)) / 1.78))
+        plane = 0.66 * (1 + 0.10 * self.pulse_s) * aspect
+        dirx, diry = math.cos(self.ang), math.sin(self.ang)
+        plx, ply = -diry * plane, dirx * plane
+        self._cam = (dirx, diry, plx, ply)
+        horizon = int(H / 2 + math.sin(self.bob_t) * 2.2 * self.bob_amt
+                      - self.recoil * 3)
+        horizon = min(H - 10, max(8, horizon))
+        bright = 1.0 + 0.30 * self.pulse_s + 0.14 * tre
+
+        # floor: twin orbiting ripple sources, fog scales the LUT index
+        # so far light dies through ember into black
+        P = self._eff()
+        t = self.tt
+        s1x = P["ox"] + P["r1"] * math.sin(P["o1"] * t)
+        s1y = P["oy"] + P["r1"] * math.cos(P["o1"] * t * 0.77)
+        s2x = P["ox"] + P["r2"] * math.sin(-P["o2"] * t + 2.1)
+        s2y = P["oy"] + P["r2"] * math.cos(P["o2"] * t * 0.6 + 1.0)
+        ys = np.arange(horizon + 1, H, dtype=np.float32)
+        if len(ys):
+            rowd = (0.5 * H) / (ys - horizon)
+            xs = np.arange(W, dtype=np.float32) / W
+            rdx0, rdy0 = dirx - plx, diry - ply
+            rdx1, rdy1 = dirx + plx, diry + ply
+            fx = self.px + rowd[:, None] * (rdx0 + (rdx1 - rdx0) * xs[None, :])
+            fy = self.py + rowd[:, None] * (rdy0 + (rdy1 - rdy0) * xs[None, :])
+            d1 = np.sqrt((fx - s1x) ** 2 + (fy - s1y) ** 2)
+            d2 = np.sqrt((fx - s2x) ** 2 + (fy - s2y) ** 2)
+            raw = (P["a1"] * np.sin(d1 * P["k1"] - 1.15 * t)
+                   + P["a2"] * np.sin(d2 * P["k2"] + 0.85 * t) + P["bias"])
+            vn = np.clip(0.5 + raw / 5.5, 0.0, 1.0)
+            fogf = bright / (1 + 0.06 * rowd * rowd)
+            idx[horizon + 1:] = np.clip(vn * 63 * fogf[:, None],
+                                        0, 63).astype(np.int16)
+
+        # walls: per-column DDA (python), per-pixel field (numpy)
+        perp = np.empty(W, np.float32)
+        uarr = np.empty(W, np.float32)
+        sides = np.empty(W, np.int8)
+        wts = np.empty(W, np.int8)
+        g = self.grid
+        for cx in range(W):
+            camx = 2 * cx / W - 1
+            rx, ry = dirx + plx * camx, diry + ply * camx
+            mx, my = int(self.px), int(self.py)
+            ddx = abs(1 / rx) if rx else 1e30
+            ddy = abs(1 / ry) if ry else 1e30
+            stx, sdx = ((-1, (self.px - mx) * ddx) if rx < 0
+                        else (1, (mx + 1 - self.px) * ddx))
+            sty, sdy = ((-1, (self.py - my) * ddy) if ry < 0
+                        else (1, (my + 1 - self.py) * ddy))
+            side, wt = 0, 1
+            for _ in range(64):
+                if sdx < sdy:
+                    sdx += ddx; mx += stx; side = 0
+                else:
+                    sdy += ddy; my += sty; side = 1
+                if not (0 <= mx < 24 and 0 <= my < 24):
+                    break
+                wt = g[my, mx]
+                if wt:
+                    break
+            d = max(0.05, (sdx - ddx) if side == 0 else (sdy - ddy))
+            perp[cx] = d
+            sides[cx] = side
+            wts[cx] = wt if wt else 1
+            uarr[cx] = (self.py + d * ry) if side == 0 else (self.px + d * rx)
+        self.zbuf = perp
+
+        line_h = H / perp
+        wall_top = horizon - line_h / 2
+        Y = np.arange(H, dtype=np.float32)[:, None]
+        vv = (Y - wall_top[None, :]) / line_h[None, :]
+        wmask = (vv >= 0) & (vv < 1)
+        vy = (vv - 0.5) * 3
+        fog = (bright / (1 + 0.06 * perp * perp)
+               * np.where(sides == 1, 0.82, 1.0))
+        rawW = np.zeros((H, W), np.float32)
+        UU = np.broadcast_to(uarr[None, :], (H, W))
+        for wt_ in (1, 2, 3):
+            m = wmask & (wts[None, :] == wt_)
+            if m.any():
+                rawW[m] = self._wall_raw(wt_, UU[m], vy[m], t)
+        vnW = np.clip(0.5 + rawW / 5.5, 0.0, 1.0)
+        wi = np.clip(vnW * 63 * np.broadcast_to(fog[None, :], (H, W)),
+                     0, 63).astype(np.int16)
+        idx[wmask] = wi[wmask]
+
+        # hearts, far to near, occluded per column by the zbuffer
+        inv = 1.0 / (plx * diry - dirx * ply)
+        for e in sorted(self.enemies,
+                        key=lambda e: -((e["x"] - self.px) ** 2 +
+                                        (e["y"] - self.py) ** 2)):
+            rx, ry = e["x"] - self.px, e["y"] - self.py
+            trx = inv * (diry * rx - dirx * ry)
+            try_ = inv * (-ply * rx + plx * ry)
+            if try_ < 0.15:
+                continue
+            scale = (0.55 * H / try_) / 2.14
+            if scale < 1.2:
+                continue
+            sx = (W / 2) * (1 + trx / try_)
+            bob = math.sin(self.tt * 2 + e["phase"]) * scale * 0.13
+            self._draw_heart(idx, W, H, sx, horizon + bob, scale,
+                             {"dying": e["dying"], "dt": e["dt"],
+                              "phase": e["phase"], "seed": e["seed"],
+                              "flame": True}, try_, ex)
+
+        # your weapon is the same heart, drawn big — wolfenstein gun slot
+        sway = math.sin(self.bob_t * 0.5) * 4 * self.bob_amt
+        self._draw_heart(idx, W, H, W / 2 + sway,
+                         H - 8 + self.recoil * 7, max(8, H * 0.16),
+                         {"dying": self.dead,
+                          "dt": max(0.0, self.wpn_death),
+                          "phase": 0.0, "seed": 1.7, "flame": True,
+                          "boost": 1 + self.muzzle * 1.4}, -1, ex)
+
+        # hp as a row of tiny hearts; a + of ember pixels as crosshair
+        for i in range(self.hp):
+            self._draw_heart(idx, W, H, 8 + i * 9, 8, 3.2,
+                             {"phase": float(i), "seed": float(i)}, -1, ex)
+        chx, chc = W // 2, ex((255, 160, 80))
+        for dy_, dx_ in ((0, -3), (0, 3), (-3, 0), (3, 0)):
+            yy, xx = horizon + dy_, chx + dx_
+            if 0 <= yy < H and 0 <= xx < W:
+                idx[yy, xx] = chc
+
+        # half-block cells: 64 cached palette strings + frame extras
+        fgs = self._fgs + [f"\x1b[38;2;{r};{g_};{b}m" for r, g_, b in extras]
+        bgs = self._bgs + [f"\x1b[48;2;{r};{g_};{b}m" for r, g_, b in extras]
+        ti, bi = idx[0::2], idx[1::2]
+        lines = []
+        for rr in range(rows):
+            tl, bl = ti[rr].tolist(), bi[rr].tolist()
+            lines.append("".join(fgs[a] + bgs[b] + "▀"
+                                 for a, b in zip(tl, bl)) + RESET)
+        lines.append(self._status(w))
+        return lines
+
+    def _status(self, w):
+        left = (BOLD + fg(WHITE) + "* " + self.msg_text + RESET
+                if self.msg_t > 0 else "")
+        right = (fg(DGREY) + f"wave {self.wave} · {self.kills} broken · "
+                 "esc wakes up" + RESET)
+        gap = w - visible_len(left) - visible_len(right)
+        if gap < 1:
+            return crop_pad(left, w)
+        return left + " " * gap + right
+
+
 class App:
     def __init__(self, ao=None):
         from ytmusicapi import YTMusic
@@ -1437,6 +2015,7 @@ class App:
         self.input_mode = False
         self.input_buf = ""
         self.input_purpose = "search"
+        self.wolf = None          # the hidden floor (search: "wolfenstein")
         self.picker = None            # playlist-picker modal state
         self.picker_sel = 0
         self.picker_track = None
@@ -1496,12 +2075,20 @@ class App:
 
     def current_list(self):
         if self.tab == 0:
-            return self.results
+            return self._src_view(self.results)
         if self.tab == 1:
-            return self.lib
+            return self._src_view(self.lib)
         if self.tab == 2:
             return self.pl_tracks if self.pl_open else self.playlists
         return self.queue
+
+    def _src_view(self, lst):
+        """S swaps the lens on search/library: everything, YT only, or
+        ☁ only. A view, never a mutation — the merged list stays whole."""
+        f = getattr(self, "src_filter", "all")
+        if f == "all":
+            return lst
+        return [t for t in lst if getattr(t, "source", "yt") == f]
 
     # ── data fetching (background threads) ───────────────────────────────────
     def _update_check(self):
@@ -1558,6 +2145,14 @@ class App:
                 self.say("session went stale — refreshed from your browser")
                 return fn()
             raise
+    def _wolf_start(self):
+        # the easter egg door: searching "wolfenstein" lands here instead
+        # of the API. music keeps playing — the game drinks the groove.
+        try:
+            self.wolf = Blackspace()
+        except Exception as e:
+            self.say(f"the blackspace stays shut: {e}")
+
     def do_search(self, query):
         self.searching = True
         self._search_q = query     # newer searches invalidate older ones
@@ -2104,6 +2699,15 @@ class App:
         return ch
 
     def handle_key(self, k):
+        if self.wolf is not None:
+            # the hidden floor swallows every key; esc/q wakes you up
+            if k in ("ESC", "q"):
+                self.wolf = None
+                self.say("the blackspace lets you go.")
+            else:
+                self.wolf.key(k)
+            return
+
         if self.input_mode:
             if k == "ESC":
                 self.input_mode = False
@@ -2112,6 +2716,11 @@ class App:
                 self.input_mode = False
                 text = self.input_buf.strip()
                 if text and self.input_purpose == "search":
+                    if text.lower() == "wolfenstein":
+                        # the search bar is the door (see Blackspace)
+                        self.input_buf = ""
+                        self._wolf_start()
+                        return
                     self.tab = 0
                     self.do_search(text)
                 elif text and self.input_purpose == "newpl":
@@ -2209,6 +2818,14 @@ class App:
             self.add_to_queue()
         elif k == "L":
             self.like_current()
+        elif k == "S":
+            cyc = ("all", "yt", "sc")
+            self.src_filter = cyc[
+                (cyc.index(getattr(self, "src_filter", "all")) + 1) % 3]
+            self.sel[self.tab] = 0
+            self.scroll[self.tab] = 0
+            self.say({"all": "sources: all", "yt": "♪ yt music only",
+                      "sc": "☁ soundcloud only"}[self.src_filter])
         elif k == "R":
             self.start_mix()
         elif k == "s":
@@ -2291,6 +2908,20 @@ class App:
         if w < 60 or h < 16:
             sys.stdout.write("\x1b[H\x1b[2J" + fg(RED) +
                              "terminal too small (need ≥ 60×16)" + RESET)
+            sys.stdout.flush()
+            return
+        if self.wolf is not None:
+            try:
+                lines = self.wolf.frame(w, h, self)
+            except Exception:
+                # never let the easter egg take the player down with it
+                self.wolf = None
+                self.say("the blackspace collapsed. it happens.")
+                return
+            out = ["\x1b[H"]
+            for i, ln in enumerate(lines[:h]):
+                out.append(f"\x1b[{i + 1};1H" + ln + "\x1b[0m\x1b[K")
+            sys.stdout.write("".join(out))
             sys.stdout.flush()
             return
         if self.viz_max:
@@ -2412,6 +3043,11 @@ class App:
         title = TABS[self.tab]
         if self.tab == 2 and self.pl_open:
             title = f"Playlists ▸ {self.pl_open.title}"
+        elif self.tab in (0, 1):
+            f = getattr(self, "src_filter", "all")
+            if f != "all":
+                title += "  ·  " + ("♪ yt only" if f == "yt"
+                                    else "☁ soundcloud only")
         out = []
         head = "  " + BOLD + fg(WHITE) + title + RESET
         if self.searching or self.loading_msg:
@@ -2622,8 +3258,8 @@ class App:
                      ("M", "tuning menu"), ("[ ]", "beat punch"),
                      ("{ }", "flow speed"), ("w", "work mode")]),
         ("WORLD", [("tab 1-4", "switch view"), ("j k", "move"),
-                   ("esc / h", "back out"), ("?", "this box"),
-                   ("q", "quit")]),
+                   ("S", "all / yt / ☁"), ("esc / h", "back out"),
+                   ("?", "this box"), ("q", "quit")]),
     ]
 
     def _render_help_overlay(self, lines, w):
@@ -4097,7 +4733,9 @@ class App:
                 # the plasma runs flat out (~125 fps tick, render cost is
                 # the real ceiling), every other style at 60; idle screen
                 # is lazier
-                if self.now or self.viz_max:
+                if self.wolf is not None:
+                    tick = 0.012   # the hidden floor is a game — keep it hot
+                elif self.now or self.viz_max:
                     tick = (0.008 if self.viz_style in ("drop", "cover")
                             else 0.016)
                 elif self.input_mode or self.help:

@@ -123,7 +123,7 @@ kept unless you say otherwise).
 | `enter` | play | `n` / `b` | next / prev |
 | `j` `k` / arrows | move | `,` / `.` | seek 10s |
 | `a` | add to queue | `+` / `-` | volume |
-| `R` | start a mix from any song | | |
+| `R` | start a mix from any song | `S` | sources: all / yt / `☁` |
 | `A` | add track to a playlist | `N` | new playlist |
 | `x` | remove (queue/liked/playlist) | `D``D` | delete playlist |
 | `L` | like / unlike (toggles) | `m` | mute |
