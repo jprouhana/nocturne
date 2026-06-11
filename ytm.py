@@ -819,36 +819,89 @@ def import_browser_auth(browser):
     return False
 
 
+def detected_browsers():
+    """Browsers with a profile on this machine, mac + linux paths."""
+    home = os.path.expanduser("~")
+    asup = os.path.join(home, "Library", "Application Support")
+    paths = {
+        "firefox": [f"{home}/.mozilla/firefox",
+                    f"{home}/.config/mozilla/firefox",
+                    f"{asup}/Firefox/Profiles"],
+        "chrome": [f"{asup}/Google/Chrome", f"{home}/.config/google-chrome"],
+        "brave": [f"{asup}/BraveSoftware/Brave-Browser",
+                  f"{home}/.config/BraveSoftware/Brave-Browser"],
+        "edge": [f"{asup}/Microsoft Edge", f"{home}/.config/microsoft-edge"],
+        "chromium": [f"{asup}/Chromium", f"{home}/.config/chromium"],
+        "vivaldi": [f"{asup}/Vivaldi", f"{home}/.config/vivaldi"],
+        "opera": [f"{asup}/com.operasoftware.Opera", f"{home}/.config/opera"],
+    }
+    return [b for b, ps in paths.items()
+            if any(os.path.isdir(p) for p in ps)]
+
+
 def login_wizard():
     print()
-    print("  ── sign in to YouTube Music ─────────────────────────")
+    print("  ── sign in to YouTube Music ──────────────────────────────")
     print()
-    print("  Make sure you're logged in at https://music.youtube.com")
-    print("  in your browser, then pick it:")
+    print("  Any method gets you your library, likes and playlists.")
+    print("  Nothing ever leaves this machine.")
     print()
-    browsers = ["firefox", "chrome", "chromium", "brave",
-                "edge", "vivaldi", "opera"]
-    for i, b in enumerate(browsers, 1):
-        print(f"    {i}) {b}")
-    print(f"    {len(browsers) + 1}) paste request headers manually")
-    print(f"    {len(browsers) + 2}) Google OAuth — no browser cookies,")
-    print("       YouTube-scoped + revocable (needs a free Google Cloud")
-    print("       client, ~5 min one-time)")
+    print("   1) from your browser" + " " * 12 + "← easiest, ~10 seconds")
+    print("      lifts your music.youtube.com session straight out of the")
+    print("      browser you're already logged in with.")
+    print("      + zero setup")
+    print("      − the saved cookies are your whole Google session")
+    print("        (kept local, chmod 600 — just know what the file is)")
+    print()
+    print("   2) paste request headers" + " " * 8 + "~1 minute")
+    print("      you copy one request from devtools yourself.")
+    print("      + nothing automated ever reads your browser files")
+    print("      − fiddly (F12 → Network → copy request headers)")
+    print()
+    print("   3) Google OAuth" + " " * 17 + "most private")
+    print("      approve a code on any device; the token is scoped to")
+    print("      YouTube ONLY and revocable from your Google account.")
+    print("      + can't touch Gmail/Drive/anything else")
+    print("      − one-time ~5 min Google Cloud setup (guided)")
+    print()
+    print("   privacy tip: keep a separate browser profile (or spare")
+    print("   account) logged into only music.youtube.com and use 1.")
     print()
     try:
-        choice = input("  choice: ").strip()
+        choice = input("  choice [1-3, enter = 1]: ").strip() or "1"
     except (EOFError, KeyboardInterrupt):
         print()
         return False
-    if not choice.isdigit() or not 1 <= int(choice) <= len(browsers) + 2:
+    if choice == "3":
+        return oauth_login()
+    if choice == "2":
+        return paste_headers_auth()
+    if choice != "1":
         print("  ✗ not a valid choice")
         return False
-    n = int(choice)
-    if n == len(browsers) + 2:
-        return oauth_login()
-    if n == len(browsers) + 1:
-        return paste_headers_auth()
-    browser = browsers[n - 1]
+
+    found = detected_browsers()
+    order = found + [b for b in ("firefox", "chrome", "chromium", "brave",
+                                 "edge", "vivaldi", "opera")
+                     if b not in found]
+    if sys.platform == "darwin":
+        print()
+        print("  (Safari isn't supported — its cookie store is sealed off;")
+        print("   use any of these you're logged in with)")
+    print()
+    for i, b in enumerate(order, 1):
+        mark = "  ← found on this machine" if b in found else ""
+        print(f"    {i}) {b}{mark}")
+    print()
+    try:
+        pick = input(f"  browser [1-{len(order)}, enter = 1]: ").strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if not pick.isdigit() or not 1 <= int(pick) <= len(order):
+        print("  ✗ not a valid choice")
+        return False
+    browser = order[int(pick) - 1]
     ok = (import_firefox_auth() if browser == "firefox"
           else import_browser_auth(browser))
     if ok:
