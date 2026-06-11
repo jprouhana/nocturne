@@ -1,6 +1,9 @@
-# ytm
+# NOCTURNE
 
-YouTube Music in the terminal. mpv handles playback, [ytmusicapi](https://github.com/sigma67/ytmusicapi)
+*(the command is still `ytm`)*
+
+Night music in the terminal — YouTube Music and SoundCloud in one
+player. mpv handles playback, [ytmusicapi](https://github.com/sigma67/ytmusicapi)
 talks to your account, and the visualizer is a real FFT of whatever is coming
 out of your speakers (it taps the PipeWire monitor with parec, so it reacts to
 the actual audio, not a fake animation).

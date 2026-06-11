@@ -23,13 +23,14 @@ echo "→ creating venv"
 python3 -m venv "$here/.venv"
 "$here/.venv/bin/pip" install --quiet --upgrade ytmusicapi pillow numpy yt-dlp secretstorage
 
-echo "→ installing launcher to ~/.local/bin/ytm"
+echo "→ installing launchers to ~/.local/bin (nocturne + ytm)"
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/ytm" <<EOF
 #!/bin/sh
 exec "$here/.venv/bin/python" "$here/ytm.py" "\$@"
 EOF
 chmod +x "$HOME/.local/bin/ytm"
+ln -sf "$HOME/.local/bin/ytm" "$HOME/.local/bin/nocturne"
 
 case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
