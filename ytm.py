@@ -2889,40 +2889,58 @@ class App:
 
     def _cell_px(self):
         """Cell size in real screen pixels (for pixel-perfect rendering).
-        Prefers the terminal's own CSI 16t answer — macOS reports zeros
-        or Retina *points* through TIOCGWINSZ, which renders the bitmap
-        at half resolution and looks chunky-blurry scaled back up."""
+        Prefers the terminal's own escape replies; without them, macOS
+        reports zeros or Retina *points* through TIOCGWINSZ — so there we
+        assume Retina and double, because oversampling just gets scaled
+        down cleanly while undersampling renders soft and blocky."""
         q = getattr(self, "_cellpx_q", None)
         if q:
             return q
+        mac = sys.platform == "darwin"
         try:
             r, c, xp, yp = struct.unpack(
                 "HHHH", fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
             if xp and yp and r and c:
-                return max(2, xp // c), max(4, yp // r)
+                cw, ch = max(2, xp // c), max(4, yp // r)
+                return (cw * 2, ch * 2) if mac else (cw, ch)
         except OSError:
             pass
-        return 10, 20
+        return (20, 40) if mac else (10, 20)
 
     def _query_cellpx(self, fd):
-        """Ask the terminal for its true cell pixel size (CSI 16t).
-        Runs once at startup, inside raw mode."""
+        """Ask the terminal for its cell pixel size: CSI 16t directly,
+        else CSI 14t (window pixels) divided by the cell grid. Runs once
+        at startup, inside raw mode."""
         try:
-            sys.stdout.write("\x1b[16t")
+            sys.stdout.write("\x1b[16t\x1b[14t")
             sys.stdout.flush()
             buf = ""
-            end = time.time() + 0.25
+            end = time.time() + 0.30
+            win = None
             while time.time() < end:
                 r, _, _ = select.select([sys.stdin], [], [], 0.05)
                 if not r:
                     continue
-                buf += os.read(fd, 64).decode("ascii", "ignore")
+                buf += os.read(fd, 128).decode("ascii", "ignore")
                 m = re.search(r"\x1b\[6;(\d+);(\d+)t", buf)
                 if m:
                     hh, ww = int(m.group(1)), int(m.group(2))
                     if ww > 1 and hh > 2:
                         self._cellpx_q = (ww, hh)
-                    return
+                        return
+                m = re.search(r"\x1b\[4;(\d+);(\d+)t", buf)
+                if m:
+                    win = (int(m.group(2)), int(m.group(1)))
+            if win:
+                try:
+                    r, c, _, _ = struct.unpack(
+                        "HHHH",
+                        fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
+                    if r and c and win[0] > c and win[1] > r:
+                        self._cellpx_q = (max(2, win[0] // c),
+                                          max(4, win[1] // r))
+                except OSError:
+                    pass
         except Exception:
             pass
 
@@ -3566,22 +3584,32 @@ def doctor():
         old_t = termios.tcgetattr(fdd)
         try:
             tty.setcbreak(fdd)
-            sys.stdout.write("\x1b[16t")
+            sys.stdout.write("\x1b[16t\x1b[14t")
             sys.stdout.flush()
-            buf, end = "", time.time() + 0.3
+            buf, end = "", time.time() + 0.35
+            got = False
             while time.time() < end:
                 rr, _, _ = select.select([sys.stdin], [], [], 0.05)
                 if rr:
-                    buf += os.read(fdd, 64).decode("ascii", "ignore")
+                    buf += os.read(fdd, 128).decode("ascii", "ignore")
                     m = re.search(r"\x1b\[6;(\d+);(\d+)t", buf)
                     if m:
                         print(f"  · terminal reports {m.group(2)}x"
                               f"{m.group(1)}px/cell (CSI 16t) — "
                               "pixel mode uses this")
+                        got = True
                         break
-            else:
-                print("  · no CSI 16t reply — pixel mode falls back to "
-                      "TIOCGWINSZ")
+            if not got:
+                m = re.search(r"\x1b\[4;(\d+);(\d+)t", buf)
+                if m:
+                    print(f"  · window is {m.group(2)}x{m.group(1)}px "
+                          "(CSI 14t) — pixel mode divides by the grid")
+                elif sys.platform == "darwin":
+                    print("  · no size replies — assuming Retina (2x "
+                          "TIOCGWINSZ)")
+                else:
+                    print("  · no size replies — pixel mode falls back "
+                          "to TIOCGWINSZ")
         finally:
             termios.tcsetattr(fdd, termios.TCSADRAIN, old_t)
     if os.path.isfile(OAUTH_FILE):
