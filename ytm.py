@@ -853,17 +853,18 @@ class App:
         self._drop_pb = self._drop_pa
         self._drop_mix = 1.0
         self._drop_switch_at = time.time() + random.uniform(12, 24)
-        # 0 = chunky half-blocks, 1 = hi-def quadrants, 2 = silk
-        # (supersampled 4× then averaged), 3 = pixel: the field blitted
-        # as a real bitmap via the kitty graphics protocol
+        # 0 = chunky half-blocks, 1 = hi-def quadrants, 2 = pixel: the
+        # field blitted as a real bitmap via the kitty graphics protocol
         self._kitty_ok = self._kitty_sniff()
         self._kitty_payload = None
         self._kitty_live = False
         self._kitty_id = 0
         self.drop_px = int(state.get(
             "drop_px", 1 if state.get("drop_hd") else 0))
-        if self.drop_px > (3 if self._kitty_ok else 2):
+        if self.drop_px == 3:      # migrate: pixel moved from 3 to 2
             self.drop_px = 2
+        if self.drop_px > (2 if self._kitty_ok else 1):
+            self.drop_px = 1
         self._drop_last_switch = 0.0
         self._drop_bass_avg = 0.15
         self._beat_t = 0.0        # beat tracker: last kick + recent gaps
@@ -1480,9 +1481,8 @@ class App:
         elif k == "ESC" and self.viz_max:
             self.viz_max = False
         elif k == "p":
-            self.drop_px = (self.drop_px + 1) % (4 if self._kitty_ok else 3)
+            self.drop_px = (self.drop_px + 1) % (3 if self._kitty_ok else 2)
             self.say(["drop: chunky pixels", "drop: hi-def pixels",
-                      "drop: silk — supersampled smooth",
                       "drop: pixel — true pixels"][self.drop_px])
         elif k in ("[", "]"):
             step = 0.2 if k == "]" else -0.2
@@ -1714,8 +1714,8 @@ class App:
             ("flow speed", "viz_speed", 0.4, 2.4, 0.2, "×"),
             ("morph speed", "viz_morph", 0.4, 2.4, 0.2, "×"),
             ("pixel quality", "drop_px",
-             0, 3 if self._kitty_ok else 2, 1,
-             ("chunky", "hi-def", "silk", "pixel")),
+             0, 2 if self._kitty_ok else 1, 1,
+             ("chunky", "hi-def", "pixel")),
         ]
 
     def _render_menu_overlay(self, lines, w):
@@ -1875,9 +1875,11 @@ class App:
         xs = np.linspace(-1.45, 1.45, cols)[None, :] / s
         ys = np.linspace(1.35, -1.45, rows * 2)[:, None] / s
         ax = np.abs(xs)
-        lobes = (ax - 0.62) ** 2 + (ys - 0.45) ** 2 < 0.49
-        wedge = (ys <= 0.45) & (ys >= -1.05) & \
-                (ax < 1.32 * (ys + 1.05) / 1.5)
+        # undertale proportions: slim lobes, then straight sides pulling
+        # in immediately below them to a clean point
+        lobes = (ax - 0.58) ** 2 + (ys - 0.52) ** 2 < 0.39
+        wedge = (ys <= 0.52) & (ys >= -1.0) & \
+                (ax < 1.2 * (ys + 1.0) / 1.52)
         return lobes | wedge
 
     def _stamp_pixels(self, out, w, pix, band0, pad_l, col):
@@ -1927,10 +1929,23 @@ class App:
         """Big pulsing heart composited over the panel right after a like,
         popping in with a theme pulse. Everything around the curve stays
         transparent so the panel keeps living underneath."""
+        import numpy as np
         rows, cols, pad_l, band0 = self._splash_geom(out, w)
         s = min(1.0, 0.35 + t * 3.5)             # pop-in scale
         c = lerp(RED, PINK, 0.5 + 0.5 * math.sin(t * 9))
         pix = self._heart_mask(rows, cols, s)
+        # the heart burns: flame tongues lick up from the crown in the
+        # complement of whatever color the heart is pulsing through
+        comp = (255 - c[0], 255 - c[1], 255 - c[2])
+        crown = pix.argmax(axis=0)               # first lit pixel per col
+        ci = np.arange(pix.shape[1])
+        flick = np.abs(np.sin(ci * 1.7 + t * 12) * np.sin(ci * 0.61 - t * 8.5))
+        fh = (1 + flick * 5 * s).astype(int)     # tongue heights, flickering
+        flame = np.zeros_like(pix)
+        for x in np.where(pix.any(axis=0))[0]:
+            if crown[x] > 0:
+                flame[max(0, crown[x] - fh[x]):crown[x], x] = True
+        self._stamp_pixels(out, w, flame, band0, pad_l, fg(comp))
         self._stamp_pixels(out, w, pix, band0, pad_l, fg(c))
         if t > 0.25:
             self._splash_label(out, w, band0 + rows, "LIKED", t,
@@ -2416,15 +2431,15 @@ class App:
         W = w if getattr(self, "eww_flush", False) else max(w - 4, 20)
         H = rows * 2
         mode = getattr(self, "drop_px", 0)
-        if mode == 3 and (not getattr(self, "_kitty_ok", False)
+        if mode == 2 and (not getattr(self, "_kitty_ok", False)
                           or getattr(self, "menu", False)
                           or time.time() - getattr(self, "_like_t", 0) < 1.9):
-            mode = 2     # overlays composite into text cells, not bitmaps
-        # silk is 4× supersampled; chunky gets the same treatment because
-        # its grid is so coarse that radial cores alias into staircases —
-        # averaging 4 subsamples per pixel costs nothing at that size
-        ss = 1 if mode == 1 else 2
-        if mode == 3:
+            mode = 1     # overlays composite into text cells, not bitmaps
+        # chunky is supersampled 2× because its grid is so coarse that
+        # radial cores alias into staircases — averaging 4 subsamples
+        # per pixel costs nothing at that size
+        ss = 2 if mode == 0 else 1
+        if mode == 2:
             # pixel: real screen pixels, with an adaptive budget — spend
             # resolution until the frame cost eats the tick, back off when
             # the encode (or a slow terminal) pushes back. the terminal
@@ -2479,7 +2494,7 @@ class App:
         zoom = 1.15 / (1.0 + 0.16 * ps)    # camera swells in on the kick
         # sample budget: maximized terminals ask for ~10× the pixels of the
         # side panel — compute the field at a capped resolution and stretch
-        if mode == 3:
+        if mode == 2:
             # field res pinned to the panel's native size, NOT the
             # adaptive output budget — otherwise every budget step would
             # change the field shape and reset the temporal ease
@@ -2556,7 +2571,7 @@ class App:
             top = idxf[y0][:, x0] * (1 - wx) + idxf[y0][:, x1] * wx
             bot = idxf[y1][:, x0] * (1 - wx) + idxf[y1][:, x1] * wx
             idxf = top * (1 - wy) + bot * wy
-        if mode == 3:
+        if mode == 2:
             return self._drop_kitty(idxf, Wpx, Hpx, W, rows, pad, bright, w)
         if ss > 1:
             # average the oversampled field down — banding edges melt
@@ -2581,7 +2596,7 @@ class App:
                     RESET + right)
             return lines
 
-        # hi-def/silk: pack each 2×2 block into a quadrant glyph split on
+        # hi-def: pack each 2×2 block into a quadrant glyph split on
         # the brighter half; colors average in palette space (the LUT is
         # luminance-monotonic, so the mean index is the mean color)
         q = idxf.reshape(rows, 2, W, 2)
@@ -2723,8 +2738,15 @@ class App:
                 # stutter on fast monitors
                 k = self.read_key(
                     max(0.002, tick - getattr(self, "_frame_cost", 0.0)))
-                if k:
+                drained = 0
+                while k and self.running:
                     self.handle_key(k)
+                    # drain everything already queued before drawing —
+                    # held keys repeat faster than a frame renders, and
+                    # one-key-per-frame turns the leftovers into ghost
+                    # scrolling after the key is released
+                    drained += 1
+                    k = self.read_key(0) if drained < 64 else None
                 t0 = time.perf_counter()
                 self.render()
                 self._frame_cost = time.perf_counter() - t0

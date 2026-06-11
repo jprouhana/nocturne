@@ -73,7 +73,7 @@ guest mode.
 | `s` | shuffle queue | `r` | repeat |
 | `v` | cycle visualizer | `c` | cycle color theme |
 | `w` | work mode (no art) | `f` | fullscreen |
-| `p` | pixel quality: chunky / hi-def / silk / pixel | `F` | maximize the visualizer |
+| `p` | pixel quality: chunky / hi-def / pixel | `F` | maximize the visualizer |
 | `M` | tuning menu (sliders) | `[` `]` `{` `}` | beat punch / flow speed |
 | `1`-`4` / `tab` | switch view | `esc` / `h` | back out of playlist |
 | `q` | quit | | |
@@ -86,10 +86,10 @@ guest mode.
 - the `drop` visualizer cycles through 28 field equations milkdrop-style
   (radial, lattice, honeycomb, fractal — many roll an off-center origin),
   crossfading every 12–24s or early when the bass hits hard. `p` cycles
-  pixel quality: chunky half-blocks, hi-def quadrants, silk (the field
-  4× oversampled and averaged down), or — in kitty, ghostty and wezterm —
-  pixel: the field blitted as a true RGB bitmap over the kitty graphics
-  protocol, real screen pixels with no block characters at all.
+  pixel quality: chunky half-blocks, hi-def quadrants, or — in kitty,
+  ghostty and wezterm — pixel: the field blitted as a true RGB bitmap
+  over the kitty graphics protocol, real screen pixels with no block
+  characters at all.
   everything is anti-aliased and eased between frames, so dense spots
   (a swirl core) stay smooth instead of strobing. the drop runs flat out
   while it owns the screen — frame cadence is held constant (render cost
