@@ -220,6 +220,13 @@ class Track:
     thumb: str = ""
     set_video_id: str = ""   # playlist membership id, needed for removal
 
+    @property
+    def source(self):
+        """Where this track lives: 'yt' (bare video id) or 'sc' (a full
+        soundcloud permalink rides in video_id and mpv plays it via
+        yt-dlp like anything else)."""
+        return "sc" if self.video_id.startswith("http") else "yt"
+
     @classmethod
     def from_item(cls, it):
         """Parse a track out of any ytmusicapi result shape."""
@@ -243,6 +250,89 @@ class Playlist:
     playlist_id: str
     title: str
     count: str = ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# soundcloud source — no API keys, no account: yt-dlp's extractors do the
+# talking (flat extraction = one HTTP round trip), and mpv streams the
+# permalink through the same yt-dlp hook that plays YouTube
+# ──────────────────────────────────────────────────────────────────────────────
+
+# a TUI owns the screen — yt-dlp must never print a byte
+_SC_SILENT = type("_SCLog", (), {
+    "debug": lambda *a, **k: None, "info": lambda *a, **k: None,
+    "warning": lambda *a, **k: None, "error": lambda *a, **k: None})()
+
+
+def _sc_extract(target, n):
+    try:
+        import yt_dlp
+    except ImportError:
+        return []
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": True,
+            "playlistend": n, "skip_download": True, "ignoreerrors": True,
+            "logger": _SC_SILENT}
+    try:
+        with yt_dlp.YoutubeDL(opts) as y:
+            data = y.extract_info(target, download=False)
+    except Exception:
+        return []
+    out = []
+    for e in (data or {}).get("entries") or []:
+        if not e:
+            continue            # a blocked entry came back None
+        # webpage_url = the clean permalink (plays in mpv AND grows a
+        # /recommended shelf); plain url is an api.soundcloud.com handle
+        url = e.get("webpage_url") or e.get("url") or ""
+        if not url.startswith("http"):
+            continue
+        thumbs = e.get("thumbnails") or []
+        out.append(Track(url, e.get("title") or "?",
+                         e.get("uploader") or "SoundCloud",
+                         album="SoundCloud",
+                         duration=fmt_time(e.get("duration")),
+                         thumb=thumbs[-1].get("url", "") if thumbs else ""))
+    return out
+
+
+def _sc_probe(tracks, keep=12, workers=6):
+    """Major-label uploads are DRM-locked and indistinguishable in the
+    flat search payload — fully resolve each candidate in parallel and
+    keep only what will actually play. ~4-5s for a dozen, which is fine
+    for results that ride in asynchronously."""
+    try:
+        import yt_dlp
+        from concurrent.futures import ThreadPoolExecutor
+    except ImportError:
+        return tracks[:keep]
+
+    def probe(t):
+        opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+                "logger": _SC_SILENT}
+        try:
+            with yt_dlp.YoutubeDL(opts) as y:
+                info = y.extract_info(t.video_id, download=False)
+            if any(f.get("acodec") not in (None, "none")
+                   for f in (info or {}).get("formats", [])):
+                return t
+        except Exception:
+            pass
+        return None
+
+    with ThreadPoolExecutor(workers) as ex:
+        return [t for t in ex.map(probe, tracks) if t][:keep]
+
+
+def sc_search(query, n=12):
+    return _sc_probe(_sc_extract(f"scsearch{n}:{query}", n), keep=n)
+
+
+def sc_related(track):
+    """SoundCloud's own 'recommended' shelf for a track — the radio."""
+    fresh = [t for t in _sc_extract(track.video_id.rstrip("/") +
+                                    "/recommended", 25)
+             if t.video_id != track.video_id]
+    return _sc_probe(fresh, keep=15)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -324,7 +414,11 @@ class Player:
         self._loading = True
         self.props["time-pos"] = None
         self.props["duration"] = None
-        self.cmd("loadfile", f"https://music.youtube.com/watch?v={video_id}")
+        # soundcloud (and any other yt-dlp-able source) tracks carry a
+        # full URL where YT tracks carry a bare video id
+        url = video_id if video_id.startswith("http") \
+            else f"https://music.youtube.com/watch?v={video_id}"
+        self.cmd("loadfile", url)
         self.cmd("set_property", "pause", False)
 
     @property
@@ -1148,6 +1242,7 @@ class App:
         self.help = False         # ?: the full command box
         self.rich_search = int(state.get("rich_search", 1))
         self.viz_art = int(state.get("viz_art", 0))
+        self.sc_on = int(state.get("sc_on", 1))  # ☁ merged soundcloud
         self.full = False
         self.viz_max = False      # F: visualizer owns the whole terminal
         self.liked_now = False
@@ -1195,6 +1290,7 @@ class App:
                            "viz_morph": self.viz_morph,
                            "rich_search": self.rich_search,
                            "viz_art": self.viz_art,
+                           "sc_on": self.sc_on,
                            "theme": THEMES[self.theme_i][0]}, f)
         except Exception:
             pass
@@ -1276,6 +1372,7 @@ class App:
             raise
     def do_search(self, query):
         self.searching = True
+        self._search_q = query     # newer searches invalidate older ones
 
         def work():
             try:
@@ -1285,6 +1382,8 @@ class App:
                     # ytmusicapi can't parse some authed filtered responses
                     # (KeyError: 'musicShelfRenderer') — unfiltered works
                     items = self.yt.search(query, limit=30)
+                if self._search_q != query:
+                    return
                 self.results = [Track.from_item(i) for i in items
                                 if i.get("videoId")]
                 self.sel[0] = 0
@@ -1292,8 +1391,18 @@ class App:
                 self.say(f"{len(self.results)} results for “{query}”")
             except Exception as e:
                 self.say(f"search failed: {e}")
-            finally:
-                self.searching = False
+            # the merger: soundcloud results ride in after, tagged ☁ —
+            # the YT results are already on screen, this only extends
+            if getattr(self, "sc_on", 1):
+                try:
+                    sc = sc_search(query)
+                    if sc and self._search_q == query:
+                        self.results = self.results + sc
+                        self.say(f"{len(self.results)} results "
+                                 f"(+{len(sc)} ☁ soundcloud)")
+                except Exception:
+                    pass
+            self.searching = False
         threading.Thread(target=work, daemon=True).start()
 
     def fetch_library(self):
@@ -1366,14 +1475,20 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def start_radio(self, track):
-        """Fill the queue with YT Music's radio for a track."""
+        """Fill the queue with the source's radio for a track — YT Music's
+        watch playlist, or SoundCloud's recommended shelf."""
         def work():
             try:
-                data = self.yt.get_watch_playlist(videoId=track.video_id,
-                                                  radio=True)
-                fresh = [Track.from_item(t) for t in data.get("tracks", [])
-                         if t.get("videoId")]
-                fresh = [t for t in fresh if t.video_id != track.video_id]
+                if track.source == "sc":
+                    fresh = sc_related(track)
+                else:
+                    data = self.yt.get_watch_playlist(
+                        videoId=track.video_id, radio=True)
+                    fresh = [Track.from_item(t)
+                             for t in data.get("tracks", [])
+                             if t.get("videoId")]
+                    fresh = [t for t in fresh
+                             if t.video_id != track.video_id]
                 if self.queue and self.queue[self.qpos].video_id == track.video_id:
                     self.queue[self.qpos + 1:] = fresh
                     self.say(f"radio: +{len(fresh)} tracks queued")
@@ -1480,6 +1595,9 @@ class App:
     def _fetch_like_state(self, vid):
         """The header ♥ (and the L toggle) should know whether the track
         is already liked, not just whether it was liked this session."""
+        if vid.startswith("http"):      # soundcloud — no YT like state
+            return
+
         def work():
             try:
                 data = self.yt.get_watch_playlist(videoId=vid, limit=1)
@@ -1492,6 +1610,9 @@ class App:
 
     def like_current(self):
         if not self.now:
+            return
+        if self.now.source == "sc":
+            self.say("☁ soundcloud track — your YT library can't hold it")
             return
         if not self.authed:
             self.say("liking needs sign-in → ytm --login")
@@ -1594,6 +1715,9 @@ class App:
         i = self.sel[self.tab]
         in_tracks = self.tab in (0, 1, 3) or (self.tab == 2 and self.pl_open)
         if not (in_tracks and lst and 0 <= i < len(lst)):
+            return
+        if not isinstance(lst[i], Playlist) and lst[i].source == "sc":
+            self.say("☁ soundcloud track — your YT playlists can't hold it")
             return
         if not self.playlists:
             self.fetch_playlists()
@@ -2117,10 +2241,12 @@ class App:
                     mark = fg(RED) + "▶ " + RESET if playing else "  "
                 faded = self.tab == 3 and i < self.qpos and not playing
                 tcol = DGREY if faded else WHITE
+                cloud = (fg(ORANGE) + "☁ " + RESET
+                         if it.source == "sc" else "")
                 dur = it.duration or ""
-                tw = w - 4 - len(dur) - 2
+                tw = w - 4 - len(dur) - 2 - (2 if cloud else 0)
                 t = it.title[:max(tw - len(it.artist) - 3, 8)]
-                line = (f" {mark}{fg(tcol)}{t}{RESET} "
+                line = (f" {mark}{cloud}{fg(tcol)}{t}{RESET} "
                         f"{fg(GREY)}{DIM}{it.artist}{RESET}")
                 pad = w - visible_len(line) - len(dur) - 2
                 line += " " * max(pad, 1) + fg(DGREY) + dur + RESET
@@ -2166,8 +2292,10 @@ class App:
             bar = fg(RED) + "▌" + RESET if is_sel else " "
             hl = bg(lerp(DARK, RED, 0.18)) if is_sel else ""
             dur = it.duration or ""
-            tw = max(8, w - 9 - len(dur) - 2)
-            t1 = (hl + BOLD + fg(WHITE) + it.title[:tw] + RESET)
+            cloud = (fg(ORANGE) + "☁ " + RESET
+                     if getattr(it, "source", "yt") == "sc" else "")
+            tw = max(8, w - 9 - len(dur) - 2 - (2 if cloud else 0))
+            t1 = (cloud + hl + BOLD + fg(WHITE) + it.title[:tw] + RESET)
             sub = it.artist + (f" · {it.album}" if it.album else "")
             t2 = (hl + fg(GREY) + DIM + sub[:tw] + RESET)
             l1 = bar + a0 + " " + t1
@@ -2191,6 +2319,7 @@ class App:
              ("chunky", "hi-def", "pixel")),
             ("rich search", "rich_search", 0, 1, 1, ("off", "on")),
             ("art overlay", "viz_art", 0, 1, 1, ("off", "on")),
+            ("☁ soundcloud", "sc_on", 0, 1, 1, ("off", "on")),
         ]
 
     def _render_menu_overlay(self, lines, w):
@@ -3904,7 +4033,7 @@ def doctor():
         path = shutil.which(tool)
         print(f"  {'✓' if path else '✗'} {tool:8s} {path or 'MISSING'}")
         ok = ok and bool(path)
-    for mod in ("ytmusicapi", "PIL"):
+    for mod in ("ytmusicapi", "PIL", "yt_dlp"):
         try:
             __import__(mod)
             print(f"  ✓ python:{mod}")

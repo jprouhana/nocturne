@@ -11,6 +11,11 @@ Album art gets rendered as truecolor half-blocks, search results start a radio
 so the music keeps going, and your library/playlists/likes work once you're
 signed in. Works fine without an account too, you just lose the library stuff.
 
+Search is a merger: SoundCloud results ride in under your YT Music hits,
+tagged `☁` — same queue, same radio (`R` on a SoundCloud track fills the
+queue from its recommended shelf), no API keys, no SoundCloud account.
+Toggle it in the `M` menu if you want YT only.
+
 The `drop` visualizer is a milkdrop-style plasma — forty-three field equations
 that morph and crossfade to the beat, driven by the real audio spectrum. Its
 sibling `cover` is the same engine painted with the current album's colors:
@@ -130,6 +135,11 @@ kept unless you say otherwise).
 
 - search results show album thumbnails and a second info line (toggle
   "rich search" in the `M` menu if you prefer dense single-line results).
+- soundcloud results appear a few seconds after the YT ones — each one
+  is verified playable first (major-label uploads there are DRM-locked,
+  so those get filtered out instead of failing when you hit enter).
+  likes/playlists are YT-side only, so `L` and `A` politely decline on
+  `☁` tracks.
 - the spectrum is 45 Hz to 11 kHz, log-spaced, with auto gain. bars have
   gravity and peak caps like cava. if there's no pulse/pipewire monitor to
   grab it falls back to a decorative wave.
