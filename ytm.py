@@ -5038,6 +5038,39 @@ def doctor():
     print(f"  {'✓' if sc_token() else '○'} soundcloud "
           + ("signed in" if sc_token()
              else "guest (search/play works; ytm --sc-login for likes)"))
+    # is the visualizer hearing REAL audio, or freewheeling?
+    print("  … listening for 3s — have music playing NOW to test reactivity")
+    tap = SpectrumTap()
+    t0 = time.time()
+    heard = False
+    while time.time() - t0 < 3.0:
+        time.sleep(0.2)
+        if tap.producing:
+            heard = True
+            break
+    lv = max(tap.levels(8) or [0.0])
+    tap.stop()
+    if heard:
+        print(f"  ✓ audio capture LIVE (level {lv:.2f}) — the visualizers "
+              "are locked to the real audio")
+    elif tap.alive:
+        print("  ○ capture is open but hears SILENCE — the visualizers are "
+              "freewheeling on synthetic motion")
+        if sys.platform == "darwin":
+            print("    → set output to the Multi-Output Device (speakers + "
+                  "BlackHole) in Audio MIDI Setup — docs/INSTALL-MACOS.md")
+            print("    → and give your terminal Microphone permission "
+                  "(System Settings → Privacy & Security → Microphone)")
+        else:
+            print("    → is music actually playing right now?")
+    else:
+        print("  ○ no audio capture — the visualizers freewheel on "
+              "synthetic motion")
+        if sys.platform == "darwin":
+            print("    → brew install blackhole-2ch, then make a "
+                  "Multi-Output Device — docs/INSTALL-MACOS.md walks it")
+        else:
+            print("    → needs pulseaudio/pipewire (parec) on PATH")
     term = os.environ.get("TERM", "?")
     prog = os.environ.get("TERM_PROGRAM", "")
     gfx = App._kitty_sniff()
