@@ -848,7 +848,10 @@ class App:
         self._drop_pb = self._drop_pa
         self._drop_mix = 1.0
         self._drop_switch_at = time.time() + random.uniform(12, 24)
-        self.drop_hd = state.get("drop_hd", False)
+        # 0 = chunky half-blocks, 1 = hi-def quadrants, 2 = silk
+        # (supersampled 4× then averaged — smooth, costs more CPU)
+        self.drop_px = int(state.get(
+            "drop_px", 1 if state.get("drop_hd") else 0))
         self._drop_last_switch = 0.0
         self._drop_bass_avg = 0.15
         self._beat_t = 0.0        # beat tracker: last kick + recent gaps
@@ -897,7 +900,7 @@ class App:
                 json.dump({"volume": self.player.props.get("volume", 70),
                            "repeat": self.repeat, "work": self.work,
                            "viz": self.viz_style,
-                           "drop_hd": self.drop_hd,
+                           "drop_px": self.drop_px,
                            "viz_react": self.viz_react,
                            "viz_speed": self.viz_speed,
                            "theme": THEMES[self.theme_i][0]}, f)
@@ -1442,9 +1445,9 @@ class App:
         elif k == "ESC" and self.viz_max:
             self.viz_max = False
         elif k == "p":
-            self.drop_hd = not self.drop_hd
-            self.say("drop: hi-def pixels" if self.drop_hd
-                     else "drop: chunky pixels")
+            self.drop_px = (self.drop_px + 1) % 3
+            self.say(["drop: chunky pixels", "drop: hi-def pixels",
+                      "drop: silk — supersampled smooth"][self.drop_px])
         elif k in ("[", "]"):
             step = 0.2 if k == "]" else -0.2
             self.viz_react = min(2.4, max(0.2, round(self.viz_react + step, 2)))
@@ -2207,7 +2210,10 @@ class App:
         import numpy as np
         W = w if getattr(self, "eww_flush", False) else max(w - 4, 20)
         H = rows * 2
-        Wpx = W * 2 if self.drop_hd else W   # hi-def: 2×2 px per cell
+        mode = getattr(self, "drop_px", 0)
+        ss = 2 if mode == 2 else 1           # silk: 4× supersampled field
+        Wpx = (W * 2 if mode else W) * ss    # hi-def: 2×2 px per cell
+        Hpx = H * ss
         pad = (w - W) // 2
 
         if bool(self.player.props.get("pause")) or self.player.loading:
@@ -2236,7 +2242,7 @@ class App:
         # field stops stretching into smears on wide panels (rings stay round)
         aspect = min(W / max(H, 1), 4.5)   # cap so wide strips stay coherent
         zoom = 1.15 / (1.0 + 0.16 * pulse)   # camera punches in on the kick
-        ys = np.linspace(-zoom, zoom, H)[:, None]
+        ys = np.linspace(-zoom, zoom, Hpx)[:, None]
         xs = np.linspace(-aspect * zoom, aspect * zoom, Wpx)[None, :]
         r = np.sqrt(xs * xs + ys * ys) + 1e-6
         ang = np.arctan2(ys, xs)
@@ -2271,10 +2277,15 @@ class App:
         # brightness: slow mood bed + a lift on the kick — no strobing
         bright = min(1.0, 0.30 + 0.50 * min(1.0, en * 1.5) + 0.30 * pulse)
         idx = np.clip((v * 63).astype(int), 0, 63)
-        rgb = np.clip(self._drop_lut()[idx] * bright, 0, 255).astype(int)
+        rgb = np.clip(self._drop_lut()[idx] * bright, 0, 255)
+        if ss > 1:
+            # silk: average the oversampled field down — banding edges
+            # melt into gradients instead of stair-stepping
+            rgb = rgb.reshape(H, ss, Wpx // ss, ss, 3).mean(axis=(1, 3))
+        rgb = rgb.astype(int)
 
         lines = []
-        if not self.drop_hd:
+        if not mode:
             for row in range(rows):
                 top, bot = rgb[row * 2], rgb[row * 2 + 1]
                 cells = [f"\x1b[38;2;{tp[0]};{tp[1]};{tp[2]}m"
@@ -2510,7 +2521,7 @@ def eww_stream(spec, style, fps, theme_name, frame_title=None):
             v.__dict__[name] = getattr(App, name).__get__(v)
     v.N_PRESETS = App.N_PRESETS
     v.viz_style = style
-    v.drop_hd = True
+    v.drop_px = 1
     v.eww_flush = True
     v.bars, v.peaks = [], []
     v._phys_t = time.time()
