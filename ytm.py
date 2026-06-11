@@ -77,6 +77,9 @@ THEMES = [
     ("ocean",     (0, 130, 255),   (0, 215, 215),   (160, 235, 255)),
     ("sunset",    (255, 80, 0),    (255, 195, 40),  (255, 120, 145)),
     ("ice",       (120, 165, 255), (195, 220, 255), (245, 250, 255)),
+    # gotham slate rising into bat-signal yellow — the drop LUT becomes
+    # black → grey clouds → a yellow glow cutting through them
+    ("batman",    (104, 110, 126), (255, 204, 0),   (255, 234, 130)),
 ]
 
 
