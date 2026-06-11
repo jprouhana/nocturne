@@ -8,6 +8,7 @@ Usage:
   ytm                 launch the TUI
   ytm setup           guided setup: deps, sign-in, theme, visualizer
   ytm --auth          sign in by pasting request headers from music.youtube.com
+  ytm --oauth         sign in with a YouTube-scoped OAuth token (no cookies)
   ytm --login         interactive sign-in wizard (pick your browser)
   ytm --auth-firefox  import your session from Firefox's cookie store
   ytm --doctor        check that all dependencies are healthy
@@ -45,6 +46,8 @@ from dataclasses import dataclass, field
 
 CONFIG_DIR = os.path.expanduser("~/.config/ytm-tui")
 AUTH_FILE = os.path.join(CONFIG_DIR, "browser.json")
+OAUTH_FILE = os.path.join(CONFIG_DIR, "oauth.json")
+OAUTH_CLIENT = os.path.join(CONFIG_DIR, "oauth_client.json")
 STATE_FILE = os.path.join(CONFIG_DIR, "state.json")
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64; rv:151.0) "
@@ -827,16 +830,21 @@ def login_wizard():
     for i, b in enumerate(browsers, 1):
         print(f"    {i}) {b}")
     print(f"    {len(browsers) + 1}) paste request headers manually")
+    print(f"    {len(browsers) + 2}) Google OAuth — no browser cookies,")
+    print("       YouTube-scoped + revocable (needs a free Google Cloud")
+    print("       client, ~5 min one-time)")
     print()
     try:
         choice = input("  choice: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return False
-    if not choice.isdigit() or not 1 <= int(choice) <= len(browsers) + 1:
+    if not choice.isdigit() or not 1 <= int(choice) <= len(browsers) + 2:
         print("  ✗ not a valid choice")
         return False
     n = int(choice)
+    if n == len(browsers) + 2:
+        return oauth_login()
     if n == len(browsers) + 1:
         return paste_headers_auth()
     browser = browsers[n - 1]
@@ -869,14 +877,77 @@ def paste_headers_auth():
     return False
 
 
+def auth_present():
+    """Any saved sign-in — browser cookies or an OAuth token."""
+    return os.path.isfile(AUTH_FILE) or (
+        os.path.isfile(OAUTH_FILE) and os.path.isfile(OAUTH_CLIENT))
+
+
+def make_ytmusic():
+    """Build the right YTMusic client for whatever auth is on disk.
+    OAuth wins when both exist — it's scoped and self-refreshing."""
+    from ytmusicapi import YTMusic
+    if os.path.isfile(OAUTH_FILE) and os.path.isfile(OAUTH_CLIENT):
+        from ytmusicapi import OAuthCredentials
+        with open(OAUTH_CLIENT) as f:
+            cl = json.load(f)
+        return YTMusic(OAUTH_FILE, oauth_credentials=OAuthCredentials(
+            cl["client_id"], cl["client_secret"]))
+    if os.path.isfile(AUTH_FILE):
+        return YTMusic(AUTH_FILE)
+    return YTMusic()
+
+
 def verify_auth():
     try:
-        from ytmusicapi import YTMusic
-        yt = YTMusic(AUTH_FILE)
+        yt = make_ytmusic()
         yt.get_library_playlists(limit=1)
         return True
     except Exception:
         return False
+
+
+def oauth_login():
+    """Device-flow OAuth: a token scoped to YouTube only — no browser
+    cookies, revocable from your Google account's security page."""
+    print()
+    print("  ── Google OAuth sign-in (no browser cookies) ────────")
+    print()
+    print("  One-time setup — Google requires your own (free) client:")
+    print("   1. console.cloud.google.com → create a project")
+    print("   2. APIs & Services → enable 'YouTube Data API v3'")
+    print("   3. OAuth consent screen → External → add yourself as a")
+    print("      test user")
+    print("   4. Credentials → Create OAuth client ID →")
+    print("      type: 'TVs and Limited Input devices'")
+    print()
+    try:
+        cid = input("  client id: ").strip()
+        csec = input("  client secret: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if not cid or not csec:
+        print("  ✗ need both")
+        return False
+    try:
+        from ytmusicapi import setup_oauth
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        setup_oauth(cid, csec, filepath=OAUTH_FILE, open_browser=False)
+        with open(OAUTH_CLIENT, "w") as f:
+            json.dump({"client_id": cid, "client_secret": csec}, f)
+        os.chmod(OAUTH_FILE, 0o600)
+        os.chmod(OAUTH_CLIENT, 0o600)
+    except Exception as e:
+        print(f"  ✗ oauth flow failed: {e}")
+        return False
+    if verify_auth():
+        print("  ✓ signed in — token saved to", OAUTH_FILE)
+        print("    revoke any time: myaccount.google.com → Security →")
+        print("    Third-party apps & services")
+        return True
+    print("  ✗ token saved but the library check failed")
+    return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -932,9 +1003,9 @@ QUADS = " ▗▖▄▝▐▞▟▘▚▌▙▀▜▛█"
 class App:
     def __init__(self, ao=None):
         from ytmusicapi import YTMusic
-        self.authed = os.path.isfile(AUTH_FILE)
+        self.authed = auth_present()
         try:
-            self.yt = YTMusic(AUTH_FILE) if self.authed else YTMusic()
+            self.yt = make_ytmusic()
         except Exception:
             self.authed = False
             self.yt = YTMusic()
@@ -1078,15 +1149,19 @@ class App:
     # ── data fetching (background threads) ───────────────────────────────────
     def _auth_refresh(self):
         """Google rotates session cookies; quietly re-import a fresh set
-        from the browser and rebuild the client."""
+        from the browser and rebuild the client. OAuth tokens refresh
+        themselves, so there a rebuild is all that's needed."""
         try:
             import io
             import contextlib
-            from ytmusicapi import YTMusic
+            if os.path.isfile(OAUTH_FILE) and os.path.isfile(OAUTH_CLIENT):
+                self.yt = make_ytmusic()
+                self.authed = True
+                return True
             with contextlib.redirect_stdout(io.StringIO()):
                 ok = import_firefox_auth()
             if ok:
-                self.yt = YTMusic(AUTH_FILE)
+                self.yt = make_ytmusic()
                 self.authed = True
                 return True
         except Exception:
@@ -3304,7 +3379,9 @@ def doctor():
         except ImportError:
             print(f"  ✗ python:{mod} MISSING")
             ok = False
-    if os.path.isfile(AUTH_FILE):
+    if os.path.isfile(OAUTH_FILE):
+        print(f"  {'✓' if verify_auth() else '✗'} oauth ({OAUTH_FILE})")
+    elif os.path.isfile(AUTH_FILE):
         print(f"  {'✓' if verify_auth() else '✗'} auth ({AUTH_FILE})")
     else:
         print("  ○ no auth file — guest mode (search/play only)")
@@ -3327,7 +3404,7 @@ def setup_wizard():
         print("    decorative motion. for the real FFT: brew install")
         print("    blackhole-2ch, then docs/INSTALL-MACOS.md")
     print()
-    if os.path.isfile(AUTH_FILE) and verify_auth():
+    if auth_present() and verify_auth():
         print("✓ already signed in")
         if input("  sign in again anyway? [y/N] ").strip().lower() == "y":
             login_wizard()
@@ -3381,6 +3458,9 @@ def main():
                     help="same as: ytm setup")
     ap.add_argument("--auth", action="store_true",
                     help="sign in by pasting browser request headers")
+    ap.add_argument("--oauth", action="store_true",
+                    help="sign in via Google OAuth device flow — no "
+                         "browser cookies, YouTube-scoped, revocable")
     ap.add_argument("--auth-firefox", action="store_true",
                     help="import session from Firefox cookies")
     ap.add_argument("--auth-browser", metavar="NAME",
@@ -3410,6 +3490,8 @@ def main():
                                  args.eww_theme, args.eww_frame) else 1)
     if args.login:
         sys.exit(0 if login_wizard() else 1)
+    if args.oauth:
+        sys.exit(0 if oauth_login() else 1)
     if args.auth:
         sys.exit(0 if paste_headers_auth() else 1)
     if args.auth_firefox:
@@ -3420,7 +3502,7 @@ def main():
     if not sys.stdin.isatty():
         print("ytm needs a TTY. Run it in a terminal.")
         sys.exit(1)
-    if not os.path.isfile(AUTH_FILE) and sys.stdout.isatty():
+    if not auth_present() and sys.stdout.isatty():
         print("  no account linked yet — search and playback still work.")
         print("  to get your library/likes/playlists:  ytm --login")
         print("  starting in guest mode in 3s…")

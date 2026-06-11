@@ -58,6 +58,12 @@ If that somehow fails there's a manual fallback: `ytm --auth`, then paste
 the request headers from any network request on music.youtube.com
 (F12 → Network → filter "browse" → copy request headers).
 
+Don't want to hand over browser cookies at all? `ytm --oauth` uses
+Google's device flow instead — a token scoped to YouTube only, revocable
+from your account's security page any time. It needs a free Google Cloud
+OAuth client ("TVs and Limited Input devices" type, ~5 minutes one-time);
+the wizard walks you through it.
+
 Auth lands in `~/.config/ytm-tui/browser.json`, chmod 600, and never leaves
 your machine. Skipping sign-in is fine too — search and playback work in
 guest mode.
