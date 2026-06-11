@@ -19,7 +19,14 @@ sibling `cover` is the same engine painted with the current album's colors:
 
 ## install
 
-You need `mpv`, `yt-dlp` and `ffmpeg` on your system. On Arch:
+On a Mac, one line does everything (Homebrew, deps, clone, launcher,
+sign-in — it even offers the visualizer's loopback driver):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jprouhana/ytm-tui/main/install-macos.sh | sh
+```
+
+On Linux you need `mpv`, `yt-dlp` and `ffmpeg` on your system. On Arch:
 
 ```sh
 sudo pacman -S mpv yt-dlp ffmpeg
@@ -39,9 +46,9 @@ theme, visualizer flavor, search style — in one pass.
 
 **On Windows?** It runs through WSL — there's a gentle, no-experience
 walkthrough at [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md).
-**On a Mac?** `brew install mpv yt-dlp ffmpeg` and you're most of the way —
-[docs/INSTALL-MACOS.md](docs/INSTALL-MACOS.md) covers the visualizer's
-loopback device and terminal choice.
+**On a Mac?** The one-liner above does it all —
+[docs/INSTALL-MACOS.md](docs/INSTALL-MACOS.md) has the manual route, the
+visualizer's loopback setup and terminal recommendations.
 
 ## signing in
 

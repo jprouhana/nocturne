@@ -6,6 +6,16 @@ graphics protocol. Two things need a quick setup pass.
 
 ## install
 
+The whole thing in one line (installs Homebrew if needed, the deps,
+offers BlackHole, clones to `~/.ytm-tui`, sets up the launcher and
+offers sign-in):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jprouhana/ytm-tui/main/install-macos.sh | sh
+```
+
+Or by hand:
+
 ```sh
 brew install mpv yt-dlp ffmpeg
 git clone https://github.com/jprouhana/ytm-tui
