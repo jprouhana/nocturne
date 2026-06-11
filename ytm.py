@@ -13,6 +13,8 @@ Usage:
 """
 
 import argparse
+import base64
+import fcntl
 import json
 import math
 import os
@@ -23,6 +25,7 @@ import shutil
 import signal
 import socket
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
@@ -32,6 +35,7 @@ import time
 import tty
 import unicodedata
 import urllib.request
+import zlib
 from dataclasses import dataclass, field
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -76,6 +80,7 @@ DIM = "\x1b[2m"
 ITAL = "\x1b[3m"
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+KITTY_MARK = "\x10"   # placeholder cell marking where a kitty image lands
 
 
 def fg(c):
@@ -849,9 +854,16 @@ class App:
         self._drop_mix = 1.0
         self._drop_switch_at = time.time() + random.uniform(12, 24)
         # 0 = chunky half-blocks, 1 = hi-def quadrants, 2 = silk
-        # (supersampled 4× then averaged — smooth, costs more CPU)
+        # (supersampled 4× then averaged), 3 = pixel: the field blitted
+        # as a real bitmap via the kitty graphics protocol
+        self._kitty_ok = self._kitty_sniff()
+        self._kitty_payload = None
+        self._kitty_live = False
+        self._kitty_id = 0
         self.drop_px = int(state.get(
             "drop_px", 1 if state.get("drop_hd") else 0))
+        if self.drop_px > (3 if self._kitty_ok else 2):
+            self.drop_px = 2
         self._drop_last_switch = 0.0
         self._drop_bass_avg = 0.15
         self._beat_t = 0.0        # beat tracker: last kick + recent gaps
@@ -1468,9 +1480,10 @@ class App:
         elif k == "ESC" and self.viz_max:
             self.viz_max = False
         elif k == "p":
-            self.drop_px = (self.drop_px + 1) % 3
+            self.drop_px = (self.drop_px + 1) % (4 if self._kitty_ok else 3)
             self.say(["drop: chunky pixels", "drop: hi-def pixels",
-                      "drop: silk — supersampled smooth"][self.drop_px])
+                      "drop: silk — supersampled smooth",
+                      "drop: pixel — true pixels"][self.drop_px])
         elif k in ("[", "]"):
             step = 0.2 if k == "]" else -0.2
             self.viz_react = min(2.4, max(0.2, round(self.viz_react + step, 2)))
@@ -1533,9 +1546,25 @@ class App:
         if self.menu:
             lines = self._render_menu_overlay(lines, w)
 
+        blob = self._kitty_payload
+        self._kitty_payload = None
+        place = None
+        if blob:
+            for i, ln in enumerate(lines[:h]):
+                j = ln.find(KITTY_MARK)
+                if j >= 0:
+                    place = (i + 1, visible_len(ln[:j]) + 1)
+                    lines[i] = ln.replace(KITTY_MARK, " ")
+                    break
         out = ["\x1b[H"]
         for i, ln in enumerate(lines[:h]):
             out.append(f"\x1b[{i + 1};1H" + ln + "\x1b[0m\x1b[K")
+        if place:
+            out.append(f"\x1b[{place[0]};{place[1]}H" + blob)
+        elif self._kitty_live:
+            # the bitmap isn't on screen this frame — clear it
+            out.append("\x1b_Ga=d,d=A,q=2\x1b\\")
+            self._kitty_live = False
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
@@ -1684,8 +1713,9 @@ class App:
             ("beat punch", "viz_react", 0.2, 2.4, 0.2, "×"),
             ("flow speed", "viz_speed", 0.4, 2.4, 0.2, "×"),
             ("morph speed", "viz_morph", 0.4, 2.4, 0.2, "×"),
-            ("pixel quality", "drop_px", 0, 2, 1,
-             ("chunky", "hi-def", "silk")),
+            ("pixel quality", "drop_px",
+             0, 3 if self._kitty_ok else 2, 1,
+             ("chunky", "hi-def", "silk", "pixel")),
         ]
 
     def _render_menu_overlay(self, lines, w):
@@ -1837,12 +1867,18 @@ class App:
         return rows, cols, pad_l, band0
 
     def _heart_mask(self, rows, cols, s=1.0):
-        """The classic (x²+y²−1)³ = x²y³ heart curve as a boolean pixel
-        grid, two pixel rows per cell row, scaled by s for the pop-in."""
+        """Heart as a boolean pixel grid (two pixel rows per cell row,
+        scaled by s for the pop-in). Emoji silhouette — two circles and
+        a wedge — because the classic (x²+y²−1)³ = x²y³ curve has lobes
+        so shallow they render as a flat top at cell resolution."""
         import numpy as np
         xs = np.linspace(-1.45, 1.45, cols)[None, :] / s
         ys = np.linspace(1.35, -1.45, rows * 2)[:, None] / s
-        return (xs ** 2 + ys ** 2 - 1) ** 3 - xs ** 2 * ys ** 3 < 0
+        ax = np.abs(xs)
+        lobes = (ax - 0.62) ** 2 + (ys - 0.45) ** 2 < 0.49
+        wedge = (ys <= 0.45) & (ys >= -1.35) & \
+                (ax < 1.32 * (ys + 1.35) / 1.8)
+        return lobes | wedge
 
     def _stamp_pixels(self, out, w, pix, band0, pad_l, col):
         """Half-block render of a boolean pixel grid composited onto the
@@ -2273,6 +2309,53 @@ class App:
                 + em * sin((wx + ys) * 3 + t * 0.7)
                 + et * 0.9 * sin(wx * 9 - t * 2.5))
 
+    @staticmethod
+    def _kitty_sniff():
+        """True if the terminal speaks the kitty graphics protocol."""
+        term = os.environ.get("TERM", "")
+        prog = os.environ.get("TERM_PROGRAM", "")
+        return any(t in (term + " " + prog).lower()
+                   for t in ("kitty", "ghostty", "wezterm"))
+
+    @staticmethod
+    def _cell_px():
+        """Cell size in screen pixels (for pixel-perfect rendering)."""
+        try:
+            r, c, xp, yp = struct.unpack(
+                "HHHH", fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
+            if xp and yp and r and c:
+                return max(2, xp // c), max(4, yp // r)
+        except OSError:
+            pass
+        return 10, 20
+
+    def _drop_kitty(self, idxf, Wpx, Hpx, W, rows, pad, bright, w):
+        """Blit the field as a true RGB bitmap (kitty graphics protocol).
+        The image is transmitted after the text frame; here we just leave
+        a blank panel with a marker cell so render() knows where it goes."""
+        import numpy as np
+        lut = np.clip(self._drop_lut() * bright, 0, 255).astype(np.uint8)
+        rgb = lut[idxf.astype(np.intp)]              # (Hpx, Wpx, 3)
+        data = base64.standard_b64encode(
+            zlib.compress(rgb.tobytes(), 1)).decode("ascii")
+        new = 91 + (self._kitty_id ^ 1)              # double-buffer ids
+        old = 91 + self._kitty_id
+        self._kitty_id ^= 1
+        head = (f"a=T,i={new},q=2,f=24,o=z,s={Wpx},v={Hpx},"
+                f"c={W},r={rows},z=-1")
+        out = []
+        for o in range(0, len(data), 4096):
+            chunk = data[o:o + 4096]
+            m = 1 if o + 4096 < len(data) else 0
+            out.append(f"\x1b_G{head},m={m};{chunk}\x1b\\" if o == 0
+                       else f"\x1b_Gm={m};{chunk}\x1b\\")
+        out.append(f"\x1b_Ga=d,d=i,i={old},q=2\x1b\\")
+        self._kitty_payload = "".join(out)
+        self._kitty_live = True
+        blank = " " * w
+        first = " " * pad + KITTY_MARK + " " * (w - pad - 1)
+        return [first] + [blank] * (rows - 1)
+
     def _drop_lut(self):
         """64-entry palette: dark → primary → secondary → accent → white."""
         if self._drop_lut_cache is None:
@@ -2330,12 +2413,25 @@ class App:
         W = w if getattr(self, "eww_flush", False) else max(w - 4, 20)
         H = rows * 2
         mode = getattr(self, "drop_px", 0)
+        if mode == 3 and (not getattr(self, "_kitty_ok", False)
+                          or getattr(self, "menu", False)
+                          or time.time() - getattr(self, "_like_t", 0) < 1.9):
+            mode = 2     # overlays composite into text cells, not bitmaps
         # silk is 4× supersampled; chunky gets the same treatment because
         # its grid is so coarse that radial cores alias into staircases —
         # averaging 4 subsamples per pixel costs nothing at that size
         ss = 1 if mode == 1 else 2
-        Wpx = (W * 2 if mode else W) * ss    # hi-def: 2×2 px per cell
-        Hpx = H * ss
+        if mode == 3:
+            # pixel: real screen pixels, capped so encode+transport stays
+            # fast — the terminal scales the bitmap to the panel anyway
+            ss = 1
+            cw, chh = self._cell_px()
+            Wpx, Hpx = W * cw, rows * chh
+            sc = min(1.0, math.sqrt(400_000 / max(1, Wpx * Hpx)))
+            Wpx, Hpx = max(64, int(Wpx * sc)), max(64, int(Hpx * sc))
+        else:
+            Wpx = (W * 2 if mode else W) * ss   # hi-def: 2×2 px per cell
+            Hpx = H * ss
         pad = (w - W) // 2
 
         if bool(self.player.props.get("pause")) or self.player.loading:
@@ -2373,8 +2469,11 @@ class App:
         # side panel — compute the field at a capped resolution and stretch
         fs = max(1.0, math.sqrt(Wpx * Hpx / 140_000))
         fw, fh = max(8, int(Wpx / fs)), max(8, int(Hpx / fs))
-        ys = np.linspace(-zoom, zoom, fh)[:, None]
-        xs = np.linspace(-aspect * zoom, aspect * zoom, fw)[None, :]
+        # float32 end to end: the trig-heavy field math and the upsample
+        # run 2-4× faster, and 24-bit color can't show the difference
+        ys = np.linspace(-zoom, zoom, fh, dtype=np.float32)[:, None]
+        xs = np.linspace(-aspect * zoom, aspect * zoom, fw,
+                         dtype=np.float32)[None, :]
 
         def coords(P):
             # each preset roll carries its own origin — radial fields can
@@ -2415,6 +2514,14 @@ class App:
         # brightness: slow mood bed + a lift on the kick — no strobing
         bright = min(1.0, 0.30 + 0.50 * min(1.0, en * 1.5) + 0.30 * ps)
         idxf = np.clip(v * 63, 0, 63)          # palette space, float
+        # ~70ms ease on the field: values glide between frames instead
+        # of snapping, which is most of what reads as "choppy". applied
+        # at field res (cheap); brightness rides the palette, so the
+        # kick still lands instantly
+        prev = getattr(self, "_drop_idxp", None)
+        if prev is not None and prev.shape == idxf.shape:
+            idxf = prev + (idxf - prev) * min(1.0, dt * 14.0)
+        self._drop_idxp = idxf
         if (fw, fh) != (Wpx, Hpx):
             # maximized panels: the field was computed under a sample
             # budget — stretch it back up bilinearly, so dense regions
@@ -2425,22 +2532,17 @@ class App:
             x0 = xf.astype(int)
             y1 = np.minimum(y0 + 1, fh - 1)
             x1 = np.minimum(x0 + 1, fw - 1)
-            wy = (yf - y0)[:, None]
-            wx = (xf - x0)[None, :]
+            wy = (yf - y0)[:, None].astype(np.float32)
+            wx = (xf - x0)[None, :].astype(np.float32)
             top = idxf[y0][:, x0] * (1 - wx) + idxf[y0][:, x1] * wx
             bot = idxf[y1][:, x0] * (1 - wx) + idxf[y1][:, x1] * wx
             idxf = top * (1 - wy) + bot * wy
+        if mode == 3:
+            return self._drop_kitty(idxf, Wpx, Hpx, W, rows, pad, bright, w)
         if ss > 1:
             # average the oversampled field down — banding edges melt
             # into gradients instead of stair-stepping
             idxf = idxf.reshape(H, ss, Wpx // ss, ss).mean(axis=(1, 3))
-        # ~70ms ease on the displayed values: cells glide between frames
-        # instead of snapping, which is most of what reads as "choppy".
-        # brightness rides the palette, so the kick still lands instantly
-        prev = getattr(self, "_drop_idxp", None)
-        if prev is not None and prev.shape == idxf.shape:
-            idxf = prev + (idxf - prev) * min(1.0, dt * 14.0)
-        self._drop_idxp = idxf
 
         # 64 palette escape strings per frame — cells become table lookups
         # instead of formatting six ints each (this is the fps)
@@ -2586,10 +2688,12 @@ class App:
                 if self.now and time.time() - self._now_wt > 2:
                     self._now_wt = time.time()
                     self._write_now()
-                # drop flows at ~30 fps; other styles tick the UI at ~25
+                # drop runs at ~60 fps; other styles tick the UI at ~25
                 # (smooth progress bar) with the visualizer itself cached
                 # down to ~12; idle screen is lazier
-                if self.now or self.input_mode or self.viz_max:
+                if self.viz_style == "drop" and (self.now or self.viz_max):
+                    tick = 0.016
+                elif self.now or self.input_mode or self.viz_max:
                     tick = 0.04
                 else:
                     tick = 0.12
@@ -2599,6 +2703,8 @@ class App:
                 self.render()
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            if self._kitty_ok:
+                sys.stdout.write("\x1b_Ga=d,d=A,q=2\x1b\\")
             sys.stdout.write("\x1b[?25h\x1b[?1049l")
             sys.stdout.flush()
             self._save_state()
