@@ -2120,6 +2120,33 @@ class App:
             return lerp(RED, ORANGE, hfrac * 2)
         return lerp(ORANGE, PINK, (hfrac - 0.5) * 2)
 
+    def _viz_pulse(self):
+        """Run the groove engine for the discrete styles too, so bars and
+        scopes get the same kick/mid/hat signals the plasma dances to.
+        Returns the smoothed kick pulse; mid/treble land on attributes."""
+        if bool(self.player.props.get("pause")) or self.player.loading:
+            raw = (0.0, 0.0, 0.0)
+        elif self.tap and self.tap.producing:
+            lv = self.tap.levels(18)
+            raw = (sum(lv[:5]) / 5, sum(lv[5:12]) / 7, sum(lv[12:]) / 6)
+        else:
+            t0 = time.time()
+            raw = (0.4 + 0.3 * math.sin(t0 * 1.9),
+                   0.4 + 0.3 * math.sin(t0 * 1.3 + 2),
+                   0.3 + 0.2 * math.sin(t0 * 2.7 + 4))
+        now = time.time()
+        dt = min(now - getattr(self, "_drop_last", now - 0.04), 0.25)
+        self._drop_last = now
+        for i, x in enumerate(raw):
+            e = self._drop_e[i]
+            k = min(1.0, (10.0 if x > e else 2.4) * dt)
+            self._drop_e[i] = e + (x - e) * k
+        pulse, _, _, _, _ = self._drop_groove(raw, dt, now)
+        ps = getattr(self, "_pulse_s", 0.0)
+        ps += (pulse - ps) * min(1.0, dt * 16.0)
+        self._pulse_s = ps
+        return ps
+
     def _viz_targets(self, n):
         """n spectrum levels 0..1 — real FFT when audio is flowing, a gentle
         animation when we can't tap it, flat when paused."""
@@ -2151,17 +2178,9 @@ class App:
             self.peaks[i] = max(self.peaks[i] - pfall, self.bars[i])
 
     def _render_visualizer(self, w, rows):
-        # the UI ticks ~25fps while playing, but discrete styles look
-        # steadier updating at ~12 — serve a cached frame in between
-        if self.viz_style not in ("drop", "cover"):
-            c = self._viz_cache
-            if c and c[1:4] == (self.viz_style, w, rows) and \
-                    time.time() - c[0] < 0.075:
-                return c[4]
-        lines = self._render_visualizer_now(w, rows)
-        if self.viz_style not in ("drop", "cover"):
-            self._viz_cache = (time.time(), self.viz_style, w, rows, lines)
-        return lines
+        # every style renders fresh every tick now — the bar physics are
+        # time-based, so high fps just means smoother, not twitchier
+        return self._render_visualizer_now(w, rows)
 
     def _render_visualizer_now(self, w, rows):
         if getattr(self, "eww_flush", False):
@@ -2184,18 +2203,34 @@ class App:
         else:
             targets = self._viz_targets(n)
         self._viz_physics(targets)
+        ps = self._viz_pulse()
+        md = getattr(self, "_mid_pulse", 0.0)
+        tp = getattr(self, "_tre_pulse", 0.0)
 
         unit = rows * 8
-        cap_c = fg(lerp(WHITE, PINK, 0.35))
+        # one color per row, groove-shaped: the kick flashes the whole
+        # gradient toward white, mids warm it toward pink
+        glow = min(0.45, 0.34 * ps)
+        rowc = []
+        for r in range(rows):
+            hfrac = (rows - 1 - r) / max(rows - 1, 1)
+            col = lerp(self._viz_color(hfrac), PINK, min(0.5, 0.35 * md))
+            rowc.append((fg(lerp(col, WHITE, glow)),
+                         fg(lerp(col, WHITE, min(0.8, glow + 0.25
+                                                 + 0.35 * tp)))))
+        # hats strobe the falling peak caps
+        cap_c = fg(lerp(lerp(WHITE, PINK, 0.35), WHITE, min(0.9, tp)))
         lines = []
         for r in range(rows):
             base = (rows - 1 - r) * 8
+            body, tip = rowc[r]
             cells = []
             for i in range(n):
                 filled = int(max(0, min(8, self.bars[i] * unit - base)))
-                if filled:
-                    hfrac = (rows - 1 - r) / max(rows - 1, 1)
-                    cells.append(fg(self._viz_color(hfrac)) + BLOCKS[filled])
+                if filled == 8:
+                    cells.append(body + "█")
+                elif filled:        # the bar's tip burns brighter
+                    cells.append(tip + BLOCKS[filled])
                 else:
                     pk = int(self.peaks[i] * unit)
                     if base <= pk < base + 8 and pk > self.bars[i] * unit + 1:
@@ -2216,6 +2251,8 @@ class App:
             t = time.time()
             s = [math.sin(t * 3.0 + x * 0.11) *
                  (0.5 + 0.3 * math.sin(t * 0.9)) for x in range(wd)]
+        ps = self._viz_pulse()
+        md = getattr(self, "_mid_pulse", 0.0)
         grid = [[0] * n for _ in range(rows)]
         prev = None
         for x, v in enumerate(s):
@@ -2225,14 +2262,36 @@ class App:
             for yy in range(lo, hi + 1):
                 grid[yy // 4][x // 2] |= BRAILLE[x % 2][yy % 4]
             prev = y
+        # phosphor: the last ~120ms of trace lingers dimly underneath,
+        # like a CRT; the live beam flashes white on the kick
+        old, gt = getattr(self, "_scope_gh", (None, 0.0))
+        nowt = time.time()
+        if not old or len(old) != rows or len(old[0]) != n:
+            old = [[0] * n for _ in range(rows)]
+            self._scope_gh = (old, nowt)
+        if nowt - gt > 0.12:
+            self._scope_gh = ([row[:] for row in grid], nowt)
+        else:
+            for rr in range(rows):
+                gr, cr = old[rr], grid[rr]
+                for ii in range(n):
+                    if cr[ii]:
+                        gr[ii] |= cr[ii]
+        glow = min(0.55, 0.45 * ps)
         lines = []
         for r in range(rows):
             cells = []
             for i in range(n):
                 m = grid[r][i]
+                g = old[r][i] & ~m
                 if m:
-                    c = lerp(RED, ORANGE, i / max(n - 1, 1))
+                    c = lerp(lerp(RED, ORANGE, i / max(n - 1, 1)),
+                             WHITE, glow)
                     cells.append(fg(c) + chr(0x2800 + m))
+                elif g:
+                    c = lerp(lerp(RED, ORANGE, i / max(n - 1, 1)),
+                             DARK, 0.62 - min(0.25, md * 0.25))
+                    cells.append(fg(c) + chr(0x2800 + g))
                 else:
                     cells.append(" ")
             lines.append(crop_pad(" " * pad_l + "".join(cells) + RESET, w))
@@ -2824,17 +2883,36 @@ class App:
         return lines
 
     def _viz_bands(self, w, rows, n, pad_l):
-        """Centered horizontal bars, one frequency band per row, bass low."""
+        """Centered horizontal bars, one frequency band per row, bass low.
+        Falling peak ticks ride the ends, the kick flashes the stack."""
         self._viz_physics(self._viz_targets(rows))
+        ps = self._viz_pulse()
+        md = getattr(self, "_mid_pulse", 0.0)
+        tp = getattr(self, "_tre_pulse", 0.0)
+        glow = min(0.45, 0.34 * ps)
+        cap_c = fg(lerp(lerp(WHITE, PINK, 0.35), WHITE, min(0.9, tp)))
         lines = []
         for r in range(rows):
             i = rows - 1 - r                        # bass at the bottom
             v = self.bars[i]
             width = int(v * n) or (1 if v > 0.02 else 0)
-            c = self._viz_color(i / max(rows - 1, 1))
+            col = lerp(self._viz_color(i / max(rows - 1, 1)),
+                       PINK, min(0.5, 0.35 * md))
+            col = lerp(col, WHITE, glow)
+            pk = int(self.peaks[i] * n)
+            cells = [" "] * n
             lp = (n - width) // 2
+            for x in range(lp, lp + width):
+                cells[x] = fg(col) + "▆"
+            if pk > width + 1:                      # peak ticks, both ends
+                pl = (n - pk) // 2
+                if 0 <= pl < n and cells[pl] == " ":
+                    cells[pl] = cap_c + "▏"
+                pr = pl + pk - 1
+                if 0 <= pr < n and cells[pr] == " ":
+                    cells[pr] = cap_c + "▕"
             lines.append(crop_pad(
-                " " * (pad_l + lp) + fg(c) + "▆" * width + RESET, w))
+                " " * pad_l + "".join(cells) + RESET, w))
         return lines
 
     def _render_progress(self, w):
@@ -2926,13 +3004,13 @@ class App:
                 if self.now and time.time() - self._now_wt > 2:
                     self._now_wt = time.time()
                     self._write_now()
-                # drop runs flat out (~125 fps tick, render cost is the
-                # real ceiling); other styles tick the UI at ~25 (smooth
-                # progress bar) with the visualizer itself cached down to
-                # ~12; idle screen is lazier
-                if self.viz_style in ("drop", "cover") and (self.now or self.viz_max):
-                    tick = 0.008
-                elif self.now or self.input_mode or self.viz_max:
+                # the plasma runs flat out (~125 fps tick, render cost is
+                # the real ceiling), every other style at 60; idle screen
+                # is lazier
+                if self.now or self.viz_max:
+                    tick = (0.008 if self.viz_style in ("drop", "cover")
+                            else 0.016)
+                elif self.input_mode:
                     tick = 0.04
                 else:
                     tick = 0.12
