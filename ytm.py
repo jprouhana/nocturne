@@ -5022,6 +5022,72 @@ def eww_stream(spec, style, fps, theme_name, frame_title=None):
     return True
 
 
+def _mac_default_output(raw=None):
+    """Name of the device macOS is currently sending output to."""
+    try:
+        if raw is None:
+            raw = subprocess.run(
+                ["system_profiler", "SPAudioDataType", "-json"],
+                capture_output=True, text=True, timeout=10).stdout
+        data = json.loads(raw)
+        for grp in data.get("SPAudioDataType", []):
+            for it in grp.get("_items", []):
+                if it.get("coreaudio_default_audio_output_device") \
+                        == "spaudio_yes":
+                    return it.get("_name", "")
+    except Exception:
+        pass
+    return ""
+
+
+def _mac_capture_err(idx, err=None):
+    """Try a half-second capture and read the refusal, if any."""
+    try:
+        if err is None:
+            p = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-f", "avfoundation",
+                 "-i", f":{idx}", "-t", "0.5", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=12)
+            err = p.stderr or ""
+        low = err.lower()
+        if "not permitted" in low or "permission" in low \
+                or "declined" in low or "tcc" in low:
+            return ("microphone permission denied — System Settings → "
+                    "Privacy & Security → Microphone → enable your terminal")
+    except Exception:
+        pass
+    return ""
+
+
+def _mac_audio_report():
+    """macOS: don't guess — test each link of the BlackHole chain and
+    name the one that's broken."""
+    idx = SpectrumTap._coreaudio_loopback()
+    if idx is None:
+        print("    ✗ no loopback device — brew install blackhole-2ch, "
+              "then make a Multi-Output Device (docs/INSTALL-MACOS.md)")
+        return
+    print(f"    ✓ loopback device installed (avfoundation :{idx})")
+    out_dev = _mac_default_output()
+    if out_dev:
+        low = out_dev.lower()
+        if "blackhole" in low or "soundflower" in low or "loopback" in low:
+            print(f"    ✗ output is “{out_dev}” DIRECTLY — you'd hear "
+                  "nothing; select the Multi-Output Device instead")
+        elif "multi" in low or "aggregate" in low:
+            print(f"    ✓ output routed through “{out_dev}”")
+        else:
+            print(f"    ✗ output is “{out_dev}” — BlackHole isn't being "
+                  "fed; pick the Multi-Output Device (Audio MIDI Setup)")
+    perm = _mac_capture_err(idx)
+    if perm:
+        print("    ✗ " + perm)
+    elif out_dev and ("multi" in out_dev.lower()
+                      or "aggregate" in out_dev.lower()):
+        print("    → chain looks right — if it still reads silent, "
+              "is music actually playing?")
+
+
 def doctor():
     ok = True
     for tool in ("mpv", "yt-dlp", "ffmpeg"):
@@ -5057,18 +5123,14 @@ def doctor():
         print("  ○ capture is open but hears SILENCE — the visualizers are "
               "freewheeling on synthetic motion")
         if sys.platform == "darwin":
-            print("    → set output to the Multi-Output Device (speakers + "
-                  "BlackHole) in Audio MIDI Setup — docs/INSTALL-MACOS.md")
-            print("    → and give your terminal Microphone permission "
-                  "(System Settings → Privacy & Security → Microphone)")
+            _mac_audio_report()
         else:
             print("    → is music actually playing right now?")
     else:
         print("  ○ no audio capture — the visualizers freewheel on "
               "synthetic motion")
         if sys.platform == "darwin":
-            print("    → brew install blackhole-2ch, then make a "
-                  "Multi-Output Device — docs/INSTALL-MACOS.md walks it")
+            _mac_audio_report()
         else:
             print("    → needs pulseaudio/pipewire (parec) on PATH")
     term = os.environ.get("TERM", "?")
