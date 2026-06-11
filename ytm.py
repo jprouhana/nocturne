@@ -1406,6 +1406,52 @@ _GLYPHS = {
     " ": ["  "] * 6,
 }
 BIG_LOGO = [" ".join(_GLYPHS[ch][r] for ch in "YT MUSIC") for r in range(6)]
+_SHADOW_CHARS = set("╔╗╚╝═║")
+_LOGO_CACHE = {}
+
+
+def fancy_logo():
+    """The YT MUSIC sign at half-block resolution: every cell splits
+    into two pixels, so the gradient runs 12 steps instead of 6, the
+    top edge of each letter catches a bevel highlight, and the
+    ANSI-shadow strokes render as dim tinted pixels instead of bare
+    box-drawing. Rebuilt per theme, cached after."""
+    key = (RED, ORANGE, PINK)
+    if key in _LOGO_CACHE:
+        return _LOGO_CACHE[key]
+    H = len(BIG_LOGO)
+    Wc = max(len(r) for r in BIG_LOGO)
+    rows = [r.ljust(Wc) for r in BIG_LOGO]
+
+    def cls(r, x):
+        ch = rows[r][x]
+        return 2 if ch == "█" else (1 if ch in _SHADOW_CHARS else 0)
+
+    out = []
+    for r in range(H):
+        seg = []
+        for x in range(Wc):
+            c = cls(r, x)
+            if not c:
+                seg.append(" ")
+                continue
+            gx = x / max(Wc - 1, 1)
+
+            def col(y, lit):
+                base = lerp(lerp(RED, PINK, y / (2 * H - 1)),
+                            lerp(ORANGE, RED, y / (2 * H - 1)), gx)
+                if c == 1:
+                    base = lerp(base, DARK, 0.66)
+                if lit:
+                    base = lerp(base, WHITE, 0.42)
+                return base
+            bevel = c == 2 and (r == 0 or cls(r - 1, x) != 2)
+            seg.append(fg(col(2 * r, bevel)) + bg(col(2 * r + 1, False))
+                       + "▀" + RESET)
+        out.append("".join(seg))
+    _LOGO_CACHE.clear()           # one theme at a time is plenty
+    _LOGO_CACHE[key] = out
+    return out
 
 
 def shadow_text(line, c1, c2):
@@ -1476,9 +1522,12 @@ class Blackspace:
 
     HOLD = 0.24          # key-held window refreshed by terminal autorepeat
 
-    def __init__(self):
+    def __init__(self, deep=False):
         import numpy as np
         self.np = np
+        # deep = running in a dedicated shader-free window (ytm --wolf):
+        # true blacks are safe there, so the palette goes all the way down
+        self.deep = deep
         self.grid = np.array(
             [[{"1": 1, "2": 2, "3": 3}.get(c, 0) for c in row.ljust(24, ".")]
              for row in WOLF_MAP], dtype=np.int8)
@@ -1719,16 +1768,17 @@ class Blackspace:
     def _ensure_lut(self):
         # 64 entries, post curve (contrast → gamma → cosine S) baked in,
         # built from the live theme so matrix gets a green dungeon.
-        # the dark anchor sits at luminance ≈ 0.175 — ABOVE the 0.15
-        # cutoff that luminance-keyed terminal shaders (scifi-space.glsl)
-        # use to decide what counts as "background". anchor it lower and
-        # the walls dissolve into the shader's starfield. lerp is
-        # luminance-linear and every theme primary clears 0.15, so the
-        # whole ramp stays solid; the ceiling alone ducks UNDER the
-        # cutoff on purpose (see frame()) — the dungeon floats in space.
+        # deep (own shader-free window): the true blackspace anchor.
+        # in-place fallback: a lifted slate — luminance-keyed terminal
+        # shaders (scifi-space.glsl) replace dark pixels with a starfield,
+        # and ghostty feeds them LINEAR-space colors, so anything below
+        # ~42% sRGB grey is "background" to them. the slate keeps the
+        # in-place mode at least partially solid; the dedicated window is
+        # the real fix. the ceiling ducks under every cutoff on purpose
+        # (see frame()) — the dungeon floats in space.
         if self.lut is not None:
             return
-        dark = (40, 44, 62)
+        dark = (8, 8, 14) if self.deep else (40, 44, 62)
         stops = [dark, lerp(dark, RED, 0.45), RED,
                  ORANGE, PINK, lerp(PINK, WHITE, 0.55)]
         pos = [0.0, 0.34, 0.60, 0.80, 0.94, 1.0]
@@ -2017,6 +2067,84 @@ class Blackspace:
         return left + " " * gap + right
 
 
+def wolf_main():
+    """Hidden: ytm --wolf — the blackspace in its own window.
+
+    Spawned by the search-bar easter egg into a shader-free, opaque
+    ghostty so the dark canvas survives luminance-keyed terminal
+    shaders. Taps the system audio monitor directly, so music playing
+    in the main ytm still drives the world."""
+    if not sys.stdin.isatty():
+        print("the blackspace needs a TTY.")
+        return 1
+    shim = None
+    try:
+        # a minimal stand-in for App: just enough for frame()'s groove
+        shim = type("WolfAudio", (), {})()
+        shim.tap = SpectrumTap()
+        shim.player = type("P", (), {"props": {}, "loading": False})()
+        shim._drop_e = [0.0, 0.0, 0.0]
+        shim._drop_bass_avg = 0.12
+        shim._drop_groove = App._drop_groove.__get__(shim)
+    except Exception:
+        shim = None
+    game = Blackspace(deep=True)
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[2J")
+    try:
+        tty.setraw(fd, termios.TCSANOW)
+        attrs = termios.tcgetattr(fd)
+        attrs[1] |= termios.OPOST | termios.ONLCR
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        running, cost = True, 0.0
+        while running:
+            r, _, _ = select.select([sys.stdin], [], [],
+                                    max(0.002, 0.012 - cost))
+            drained = 0
+            while r and drained < 64:
+                ch = os.read(fd, 1).decode(errors="ignore")
+                if ch == "\x1b":
+                    r2, _, _ = select.select([sys.stdin], [], [], 0.01)
+                    seq = (os.read(fd, 2).decode(errors="ignore")
+                           if r2 else "")
+                    ch = {"[A": "UP", "[B": "DOWN", "[C": "RIGHT",
+                          "[D": "LEFT"}.get(seq, "ESC")
+                if ch in ("ESC", "q", "\x03"):
+                    running = False
+                    break
+                game.key(ch)
+                drained += 1
+                r, _, _ = select.select([sys.stdin], [], [], 0)
+            if not running:
+                break
+            t0 = time.perf_counter()
+            size = os.get_terminal_size()
+            w, h = size.columns, size.lines
+            if w < 40 or h < 12:
+                sys.stdout.write("\x1b[H\x1b[2Jthe door is too small.")
+                sys.stdout.flush()
+                time.sleep(0.2)
+                continue
+            lines = game.frame(w, h, shim)
+            out = ["\x1b[H"]
+            for i, ln in enumerate(lines[:h]):
+                out.append(f"\x1b[{i + 1};1H" + ln + "\x1b[0m\x1b[K")
+            sys.stdout.write("".join(out))
+            sys.stdout.flush()
+            cost = time.perf_counter() - t0
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write("\x1b[?25h\x1b[?1049l")
+        sys.stdout.flush()
+        if shim is not None:
+            try:
+                shim.tap.stop()
+            except Exception:
+                pass
+    return 0
+
+
 class App:
     def __init__(self, ao=None):
         from ytmusicapi import YTMusic
@@ -2238,6 +2366,24 @@ class App:
     def _wolf_start(self):
         # the easter egg door: searching "wolfenstein" lands here instead
         # of the API. music keeps playing — the game drinks the groove.
+        # preferred: a dedicated shader-free opaque ghostty window
+        # (ytm --wolf), where the true-black canvas can't be eaten by
+        # luminance-keyed terminal shaders; in-place mode is the fallback.
+        if shutil.which("ghostty") and (os.environ.get("WAYLAND_DISPLAY")
+                                        or os.environ.get("DISPLAY")):
+            try:
+                subprocess.Popen(
+                    ["ghostty", "--custom-shader=",
+                     "--background=#050507", "--background-opacity=1",
+                     "--background-blur=0", "--title=the blackspace",
+                     "-e", sys.executable, os.path.abspath(__file__),
+                     "--wolf"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
+                self.say("the blackspace opens a door.")
+                return
+            except Exception:
+                pass
         try:
             self.wolf = Blackspace()
         except Exception as e:
@@ -3095,10 +3241,8 @@ class App:
         lines = []
         big = w >= 76 and self.size.lines >= 26
         if big:
-            for r, row in enumerate(BIG_LOGO):
-                cl = lerp(RED, PINK, r / 5)
-                cr = lerp(ORANGE, RED, r / 5)
-                ln = "  " + shadow_text(row, cl, cr)
+            for r, row in enumerate(fancy_logo()):
+                ln = "  " + row
                 if r == 0:
                     pad = w - visible_len(ln) - visible_len(acct) - 2
                     ln += " " * max(pad, 1) + acct + " "
@@ -3235,7 +3379,7 @@ class App:
                 src = ""
                 if self.tab in (0, 1, 3):    # the mixed-source views
                     src = ((fg(ORANGE) + "☁ " if it.source == "sc"
-                            else fg(RED) + "♪ ") + RESET)
+                            else fg(RED) + "▶ ") + RESET)
                 dur = it.duration or ""
                 tw = w - 4 - len(dur) - 2 - (2 if src else 0)
                 t = it.title[:max(tw - len(it.artist) - 3, 8)]
@@ -3286,7 +3430,7 @@ class App:
             hl = bg(lerp(DARK, RED, 0.18)) if is_sel else ""
             dur = it.duration or ""
             cloud = ((fg(ORANGE) + "☁ " if getattr(it, "source", "yt") == "sc"
-                      else fg(RED) + "♪ ") + RESET)
+                      else fg(RED) + "▶ ") + RESET)
             tw = max(8, w - 9 - len(dur) - 2 - 2)
             t1 = (cloud + hl + BOLD + fg(WHITE) + it.title[:tw] + RESET)
             sub = it.artist + (f" · {it.album}" if it.album else "")
@@ -5372,11 +5516,14 @@ def main():
     ap.add_argument("--eww-frame", metavar="TITLE", default=None,
                     help="wrap --eww frames in an ascii box with this title")
     ap.add_argument("--ao", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--wolf", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.version:
         print(version_string())
         sys.exit(0)
+    if args.wolf:
+        sys.exit(wolf_main())
     if args.cmd == "setup" or args.setup:
         sys.exit(0 if setup_wizard() else 1)
     if args.cmd == "update":
