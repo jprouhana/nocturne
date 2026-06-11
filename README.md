@@ -11,7 +11,7 @@ Album art gets rendered as truecolor half-blocks, search results start a radio
 so the music keeps going, and your library/playlists/likes work once you're
 signed in. Works fine without an account too, you just lose the library stuff.
 
-The `drop` visualizer is a milkdrop-style plasma — forty-two field equations
+The `drop` visualizer is a milkdrop-style plasma — forty-three field equations
 that morph and crossfade to the beat, driven by the real audio spectrum. Its
 sibling `cover` is the same engine painted with the current album's colors:
 
@@ -108,6 +108,7 @@ kept unless you say otherwise).
 
 | key | | key | |
 |-----|------------|-----|------------|
+| `?` | every command, in one box | | |
 | `/` | search | `space` | play/pause |
 | `enter` | play | `n` / `b` | next / prev |
 | `j` `k` / arrows | move | `,` / `.` | seek 10s |
@@ -132,10 +133,11 @@ kept unless you say otherwise).
 - the spectrum is 45 Hz to 11 kHz, log-spaced, with auto gain. bars have
   gravity and peak caps like cava. if there's no pulse/pipewire monitor to
   grab it falls back to a decorative wave.
-- the `drop` visualizer cycles through 42 field equations milkdrop-style
+- the `drop` visualizer cycles through 43 field equations milkdrop-style
   (radial, lattice, honeycomb, fractal — many roll an off-center origin,
-  plus a calm "blackspace" family: interference waves glowing out of
-  darkness, which is also what the eww desktop widget plays),
+  a calm "blackspace" family of interference waves glowing out of
+  darkness, and yes, one of them is a smiley that winks. the eww desktop
+  widget plays a curated pixel-friendly mix of the lot),
   crossfading every 12–24s or early when the bass hits hard. `p` cycles
   pixel quality: chunky half-blocks, hi-def quadrants, or — in kitty,
   ghostty and wezterm — pixel: the field blitted as a true RGB bitmap

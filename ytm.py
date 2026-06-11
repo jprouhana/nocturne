@@ -1014,9 +1014,14 @@ BLOCKS = " ▁▂▃▄▅▆▇█"
 VIZ_STYLES = ["bars", "mirror", "scope", "bands", "drop", "cover"]
 
 # the blackspace family — calm interference waves glowing out of darkness,
-# cheap to compute (a few sines, no log/atan stacks). the eww desktop
-# widget rotates through only these; in the app they join the normal pool
+# cheap to compute (a few sines, no log/atan stacks); they join the app's
+# normal preset pool
 WAVE_PRESETS = list(range(36, 42))
+# what the eww desktop widget rotates through: a curated mix that reads
+# well as chunky pixels at 5fps — hexagons, fractal plasma, raindrop
+# ripples, kaleidoscope, chevrons, a spinning box, the two best
+# blackspace waves, and a smiley that winks at you
+WIDGET_PRESETS = [3, 24, 25, 29, 30, 34, 36, 39, 42]
 BADGE = ["█▙  ", "███▙", "█▛  "]
 LOGO = [
     "█▖ ▗█ ▀▀█▀▀   █▀▄▀█ █   █ ▗█▀▀▀ ▀█▀ ▗█▀▀",
@@ -1138,6 +1143,7 @@ class App:
         self.viz_morph = float(state.get("viz_morph", 1.0))   # preset churn
         self.menu = False         # M: slider overlay for all of the above
         self.menu_sel = 0
+        self.help = False         # ?: the full command box
         self.rich_search = int(state.get("rich_search", 1))
         self.viz_art = int(state.get("viz_art", 0))
         self.full = False
@@ -1780,6 +1786,13 @@ class App:
                 setattr(self, attr, int(cur) if isinstance(step, int) else cur)
             return
 
+        if self.help:
+            self.help = False      # any key returns to the adventure
+            return
+        if k == "?":
+            self.help = True
+            return
+
         lst = self.current_list()
         if k == "q":
             self.running = False
@@ -1932,6 +1945,8 @@ class App:
             lines.append(self._render_footer(w))
         if self.menu:
             lines = self._render_menu_overlay(lines, w)
+        if self.help:
+            lines = self._render_help_overlay(lines, w)
 
         blob = self._kitty_payload
         self._kitty_payload = None
@@ -2209,6 +2224,84 @@ class App:
                  f"{hint:^{bw - 2}}" + RESET + bord + "│" + RESET,
                  bord + "╰" + "─" * (bw - 2) + "╯" + RESET]
         y0 = max(1, (len(lines) - len(rows)) // 2)
+        for i, rrow in enumerate(rows):
+            if y0 + i >= len(lines):
+                break
+            cells = ansi_cells(lines[y0 + i], w)
+            for j, (sgr, ch) in enumerate(ansi_cells(rrow, bw)):
+                if ch:
+                    put_cell(cells, x0 + j, sgr, ch)
+            lines[y0 + i] = cells_to_str(cells)
+        return lines
+
+    HELP_SECTIONS = [
+        ("PLAY", [("enter", "play"), ("spc", "pause"),
+                  ("n / b", "next / prev"), (", / .", "seek 10s"),
+                  ("+ / -", "volume"), ("m", "mute"),
+                  ("s", "shuffle"), ("r", "repeat / loop"),
+                  ("R", "mix from song")]),
+        ("SOUL", [("L", "like / unlike"), ("/", "search"),
+                  ("a", "add to queue"), ("A", "→ playlist"),
+                  ("N", "new playlist"), ("x", "remove"),
+                  ("D D", "delete playlist")]),
+        ("VISUALS", [("v", "visualizer"), ("c", "theme"),
+                     ("p", "pixel quality"), ("t", "art overlay"),
+                     ("F", "max visualizer"), ("f", "fullscreen"),
+                     ("M", "tuning menu"), ("[ ]", "beat punch"),
+                     ("{ }", "flow speed"), ("w", "work mode")]),
+        ("WORLD", [("tab 1-4", "switch view"), ("j k", "move"),
+                   ("esc / h", "back out"), ("?", "this box"),
+                   ("q", "quit")]),
+    ]
+
+    def _render_help_overlay(self, lines, w):
+        """?: every command in one Undertale dialogue box — chunky white
+        border, the soul as section bullet, asterisk sign-off. Any key
+        closes it. Exists because the footer hints truncate on narrow
+        terminals and people couldn't find the rest."""
+        hc = lerp(RED, PINK, 0.5 + 0.5 * math.sin(time.time() * 6))
+        bw = min(w - 2, 72)
+        two = bw >= 58
+        ncols = 2 if two else 1
+        colw = (bw - 4 - 2 * ncols) // ncols
+        split = [self.HELP_SECTIONS[:2], self.HELP_SECTIONS[2:]] if two \
+            else [self.HELP_SECTIONS]
+        cols = []
+        for secs in split:
+            col = []
+            for title, keys in secs:
+                if col:
+                    col.append("")
+                col.append(fg(hc) + "♥ " + RESET + BOLD + fg(WHITE)
+                           + title + RESET)
+                for key, lab in keys:
+                    col.append("  " + fg(ORANGE) + f"{key:<9}" + RESET
+                               + fg(GREY) + lab + RESET)
+            cols.append(col)
+        n = max(len(c) for c in cols)
+        for c in cols:
+            c += [""] * (n - len(c))
+
+        def fit(s, width):
+            return s + " " * max(0, width - visible_len(s))
+
+        bord = BOLD + fg(WHITE)
+        t = " * COMMANDS * "
+        lpad = (bw - 2 - len(t)) // 2
+        rows = [bord + "╔" + "═" * lpad + RESET + BOLD + fg(hc) + t + RESET
+                + bord + "═" * (bw - 2 - len(t) - lpad) + "╗" + RESET,
+                bord + "║" + " " * (bw - 2) + "║" + RESET]
+        for i in range(n):
+            body = "  ".join(fit(c[i], colw) for c in cols)
+            rows.append(bord + "║" + RESET + " " + fit(body, bw - 4) + " "
+                        + bord + "║" + RESET)
+        sign = "* press any key to continue your adventure"
+        rows += [bord + "║" + " " * (bw - 2) + "║" + RESET,
+                 bord + "║" + RESET + fg(DGREY) + ITAL
+                 + f"{sign:^{bw - 2}}" + RESET + bord + "║" + RESET,
+                 bord + "╚" + "═" * (bw - 2) + "╝" + RESET]
+        x0 = (w - bw) // 2
+        y0 = max(0, (len(lines) - len(rows)) // 2)
         for i, rrow in enumerate(rows):
             if y0 + i >= len(lines):
                 break
@@ -2706,6 +2799,10 @@ class App:
             # would slice the glow into rings — and deeper shadows
             p["band"] = 0
             p["gam"] = random.uniform(1.1, 1.35)
+        elif preset == 42:
+            # the smiley reads as a face, not as level-set rings
+            p["band"] = 0
+            p["gam"] = random.uniform(1.0, 1.2)
         return p
 
     def _drop_post(self, v, P):
@@ -2718,7 +2815,7 @@ class App:
             return 0.5 - 0.5 * np.cos(v * math.tau * P["band"])
         return 0.5 - 0.5 * np.cos(v * math.pi)
 
-    N_PRESETS = 42
+    N_PRESETS = 43
 
     def _drop_field(self, preset, P, xs, ys, r, ang, t, eb, em, et):
         """One milkdrop-ish interference field. Each preset is a different
@@ -2991,11 +3088,33 @@ class App:
                         - t * 0.5) * 2.8
                     + sin((xs - ys) * 1.3 + t * 0.27) * 1.5
                     - 1.8 + em * 0.5 * sin(xs * 3 + t * 0.8))
-        # 41: ember curtain — aurora bands glowing out of blackness
-        cur = sin(xs * (k1 * 0.4 + 1.0)
-                  + sin(ys * 1.4 + t * 0.5) * (1.8 + 1.5 * eb))
-        return (cur * 2.9 + sin(ys * 1.5 - t * 0.35) * 1.2
-                - 1.8 + et * 0.5 * sin(xs * 6 - t * 1.6))
+        if preset == 41:   # ember curtain — aurora out of blackness
+            cur = sin(xs * (k1 * 0.4 + 1.0)
+                      + sin(ys * 1.4 + t * 0.5) * (1.8 + 1.5 * eb))
+            return (cur * 2.9 + sin(ys * 1.5 - t * 0.35) * 1.2
+                    - 1.8 + et * 0.5 * sin(xs * 6 - t * 1.6))
+        # 42: smiley — a grinning face beaming over a gentle ripple.
+        # pure distance fields (ring + two dots + an arc), so it's as
+        # cheap as any wave; one eye winks on a slow clock
+        bob_x = 0.30 * math.sin(t * 0.31)
+        bob_y = 0.18 * math.sin(t * 0.23)
+        fx, fy = xs - bob_x, ys - bob_y
+        fr2 = np.sqrt(fx * fx + fy * fy)
+        face = 1.0 / (1.0 + np.abs(fr2 - 0.62) * (14 + 8 * eb))
+        wink = 1.0 if math.sin(t * 0.7) > -0.6 else 0.22   # ;)
+        e1 = (fx + 0.24) ** 2 + (fy + 0.22) ** 2
+        e2 = (fx - 0.24) ** 2 + ((fy + 0.22) / wink) ** 2
+        eyes = 1.0 / (1.0 + e1 * 120) + 1.0 / (1.0 + e2 * 120)
+        arc = np.abs(np.sqrt(fx * fx + (fy + 0.06) ** 2) - 0.40)
+        smile = (1.0 / (1.0 + arc * (26 + 20 * em))
+                 * np.clip((fy - 0.04) * 9, 0.0, 1.0))   # soft lower-arc mask
+        ripple = (0.8 * sin(r * 3 - t)
+                  * np.clip((fr2 - 0.62) * 1.6, 0.15, 1.0))  # calm on the face
+        return ((face * 2.6 + eyes * 3.4 + smile * 2.8)
+                * (1.0 + 0.5 * eb)
+                + ripple - 1.45
+                - 1.1 * np.clip((0.62 - fr2) * 2.2, 0.0, 1.0)  # dark face
+                + et * 0.4 * sin(r * 9 - t * 2.5))
 
     @staticmethod
     def _kitty_sniff():
@@ -3217,7 +3336,8 @@ class App:
         H = rows * 2
         mode = getattr(self, "drop_px", 0)
         if mode == 2 and (not getattr(self, "_kitty_ok", False)
-                          or getattr(self, "menu", False)):
+                          or getattr(self, "menu", False)
+                          or getattr(self, "help", False)):
             mode = 1     # overlays composite into text cells, not bitmaps
         if mode == 2 and time.time() - getattr(self, "_like_t", 0) < 1.9:
             # splash frames: the heart composites into text cells too, but
@@ -3490,16 +3610,18 @@ class App:
         if self.status and time.time() - self.status_t < 4:
             return crop_pad("  " + fg(ORANGE) + self.status + RESET, w)
         if self.viz_max:
-            keys = [("F", "exit"), ("M", "tune"), ("v", "viz"),
+            keys = [("?", "keys"), ("F", "exit"), ("M", "tune"), ("v", "viz"),
                     ("c", "theme"), ("p", "px"), ("t", "art"), ("spc", "pause"),
                     ("n/b", "skip"), ("L", "like"), ("±", "vol"),
                     ("q", "quit")]
         elif self.full:
-            keys = [("f", "exit full"), ("spc", "pause"), ("n/b", "skip"),
+            keys = [("?", "keys"), ("f", "exit full"), ("spc", "pause"),
+                    ("n/b", "skip"),
                     ("v", "viz"), ("c", "theme"), ("p", "hd"),
                     ("w", "work"), ("±", "vol"), ("q", "quit")]
         else:
-            keys = [("/", "find"), ("↵", "play"), ("spc", "pause"),
+            keys = [("?", "keys"), ("/", "find"), ("↵", "play"),
+                    ("spc", "pause"),
                     ("n/b", "skip"), ("R", "mix"), ("q", "quit"), ("f", "full"),
                     ("F", "max viz"), ("M", "tune"), ("v", "viz"),
                     ("c", "theme"), ("w", "work"),
@@ -3687,9 +3809,12 @@ def eww_stream(spec, style, fps, theme_name, frame_title=None):
     v._drop_last = time.time()
     v._drop_e = [0.0, 0.0, 0.0]
     v._drop_lut_cache = None
-    # the widget lives on the blackspace waves — calm, cheap, lots of dark
-    v._drop_pool = WAVE_PRESETS
-    v._drop_preset = random.choice(WAVE_PRESETS)
+    # the widget plays a curated pixel-friendly mix, livelier than the
+    # app default: faster flow and quicker morphs suit a 5fps canvas
+    v._drop_pool = WIDGET_PRESETS
+    v.viz_speed = 1.6
+    v.viz_morph = 1.4
+    v._drop_preset = random.choice(WIDGET_PRESETS)
     v._drop_prev = v._drop_preset
     v._drop_pa = v._drop_new_params(v._drop_preset)
     v._drop_pb = v._drop_pa
