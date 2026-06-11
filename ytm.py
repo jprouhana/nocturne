@@ -860,6 +860,9 @@ class App:
         self._drop_energy = 0.2   # slow mood bed, immune to frame jitter
         self.viz_react = float(state.get("viz_react", 1.0))   # [ ]
         self.viz_speed = float(state.get("viz_speed", 1.0))   # { }
+        self.viz_morph = float(state.get("viz_morph", 1.0))   # preset churn
+        self.menu = False         # M: slider overlay for all of the above
+        self.menu_sel = 0
         self.full = False
         self.viz_max = False      # F: visualizer owns the whole terminal
         self.liked_now = False
@@ -903,6 +906,7 @@ class App:
                            "drop_px": self.drop_px,
                            "viz_react": self.viz_react,
                            "viz_speed": self.viz_speed,
+                           "viz_morph": self.viz_morph,
                            "theme": THEMES[self.theme_i][0]}, f)
         except Exception:
             pass
@@ -1367,6 +1371,22 @@ class App:
                 self.picker = None
             return
 
+        if self.menu:
+            items = self._menu_items()
+            if k in ("ESC", "M", "q"):
+                self.menu = False
+            elif k in ("UP", "k"):
+                self.menu_sel = (self.menu_sel - 1) % len(items)
+            elif k in ("DOWN", "j"):
+                self.menu_sel = (self.menu_sel + 1) % len(items)
+            elif k in ("LEFT", "h", "RIGHT", "l"):
+                _, attr, lo, hi, step, _ = items[self.menu_sel]
+                cur = getattr(self, attr) + (step if k in ("RIGHT", "l")
+                                             else -step)
+                cur = min(hi, max(lo, round(cur, 2)))
+                setattr(self, attr, int(cur) if isinstance(step, int) else cur)
+            return
+
         lst = self.current_list()
         if k == "q":
             self.running = False
@@ -1442,6 +1462,9 @@ class App:
             self.viz_max = not self.viz_max
             if self.viz_max:
                 self.say("visualizer maximized — F or esc brings it back")
+        elif k == "M":
+            self.menu = True
+            self.menu_sel = 0
         elif k == "ESC" and self.viz_max:
             self.viz_max = False
         elif k == "p":
@@ -1507,6 +1530,8 @@ class App:
             for i in range(body_h):
                 lines.append(left[i] + sep + right[i])
             lines.append(self._render_footer(w))
+        if self.menu:
+            lines = self._render_menu_overlay(lines, w)
 
         out = ["\x1b[H"]
         for i, ln in enumerate(lines[:h]):
@@ -1651,6 +1676,60 @@ class App:
                     " " + fg(RED) + "▌" + fg(WHITE) + plain[1:], w)
             out.append(crop_pad(line, w))
         return out
+
+    def _menu_items(self):
+        """(label, attr, lo, hi, step, fmt) — fmt is a suffix string for
+        continuous sliders or a tuple of names for discrete ones."""
+        return [
+            ("beat punch", "viz_react", 0.2, 2.4, 0.2, "×"),
+            ("flow speed", "viz_speed", 0.4, 2.4, 0.2, "×"),
+            ("morph speed", "viz_morph", 0.4, 2.4, 0.2, "×"),
+            ("pixel quality", "drop_px", 0, 2, 1,
+             ("chunky", "hi-def", "silk")),
+        ]
+
+    def _render_menu_overlay(self, lines, w):
+        """M: tuning sliders composited over whatever is on screen — the
+        visualizer keeps dancing behind the panel while you tweak it."""
+        items = self._menu_items()
+        bw = min(w - 6, 50)
+        barw = bw - 26
+        x0 = (w - bw) // 2
+        bord = fg(DGREY)
+        t = " visualizer tuning "
+        lpad = (bw - 2 - len(t)) // 2
+        rows = [bord + "╭" + "─" * lpad + RESET + BOLD + fg(ORANGE) + t +
+                RESET + bord + "─" * (bw - 2 - len(t) - lpad) + "╮" + RESET,
+                bord + "│" + " " * (bw - 2) + "│" + RESET]
+        for i, (label, attr, lo, hi, step, fmt) in enumerate(items):
+            cur = getattr(self, attr)
+            fill = int(round((cur - lo) / (hi - lo) * barw))
+            sel = i == self.menu_sel
+            pre = (fg(PINK) + "▸ " + RESET) if sel else "  "
+            lab = ((BOLD + fg(WHITE) if sel else fg(GREY)) +
+                   f"{label:<14}" + RESET)
+            bar = (fg(RED) + "█" * fill +
+                   fg(DGREY) + "░" * (barw - fill) + RESET)
+            val = fmt[int(cur)] if isinstance(fmt, tuple) else f"{cur:.1f}{fmt}"
+            val = ((fg(ORANGE) if sel else fg(GREY)) + f" {val:>7}" + RESET)
+            row = pre + lab + bar + val
+            row += " " * max(0, bw - 2 - visible_len(row))
+            rows.append(bord + "│" + RESET + row + bord + "│" + RESET)
+        hint = "←/→ adjust · ↑/↓ pick · esc close"
+        rows += [bord + "│" + " " * (bw - 2) + "│" + RESET,
+                 bord + "│" + RESET + fg(DGREY) + ITAL +
+                 f"{hint:^{bw - 2}}" + RESET + bord + "│" + RESET,
+                 bord + "╰" + "─" * (bw - 2) + "╯" + RESET]
+        y0 = max(1, (len(lines) - len(rows)) // 2)
+        for i, rrow in enumerate(rows):
+            if y0 + i >= len(lines):
+                break
+            cells = ansi_cells(lines[y0 + i], w)
+            for j, (sgr, ch) in enumerate(ansi_cells(rrow, bw)):
+                if ch:
+                    put_cell(cells, x0 + j, sgr, ch)
+            lines[y0 + i] = cells_to_str(cells)
+        return lines
 
     def _render_viz_max(self, w, h):
         """F: the visualizer owns the whole terminal, border to border,
@@ -1990,10 +2069,15 @@ class App:
         return lines
 
     def _drop_new_params(self):
+        # ~half the rolls knock the origin off-center so radial presets
+        # stop staring at the exact middle of the panel every time
+        off = random.random() < 0.45
         return {"k1": random.uniform(2.0, 5.5),
                 "k2": random.uniform(2.0, 8.0),
                 "arms": random.choice([2, 3, 3, 4, 5, 6]),
                 "ph": random.uniform(0, math.tau),
+                "cx": random.uniform(-1.1, 1.1) if off else 0.0,
+                "cy": random.uniform(-0.6, 0.6) if off else 0.0,
                 # post-processing personality: 0 = smooth, n = n sharp
                 # palette bands (milkdrop-style colorful level sets)
                 "band": random.choice([0, 0, 0, 2, 2, 3, 3, 4]),
@@ -2009,7 +2093,7 @@ class App:
             return 0.5 - 0.5 * np.cos(v * math.tau * P["band"])
         return 0.5 - 0.5 * np.cos(v * math.pi)
 
-    N_PRESETS = 24
+    N_PRESETS = 28
 
     def _drop_field(self, preset, P, xs, ys, r, ang, t, eb, em, et):
         """One milkdrop-ish interference field. Each preset is a different
@@ -2147,12 +2231,48 @@ class App:
             return (sin(a1 + t) + sin(a2 - t * 0.8) + sin(a3 + t * 0.6)
                     + eb * 2.2 * sin(r * (4 + 5 * eb) - t * 2)
                     + et * sin(r * 15 - t * 4))
-        # 23: comet swirl — log-spiral arms breathing with the kick
-        sw = ang * A + np.log(r + 0.25) * (k2 + 2 * em)
-        return (sin(sw - t * 1.8)
-                + sin(r * (4 + 9 * eb) - t * 2.2)
-                + sin(sw * 0.5 + t * 0.7)
-                + et * 1.3 * sin(r * 12 + ang * 2 - t * 3))
+        if preset == 23:   # comet swirl — log-spiral arms breathing
+            sw = ang * A + np.log(r + 0.25) * (k2 + 2 * em)
+            return (sin(sw - t * 1.8)
+                    + sin(r * (4 + 9 * eb) - t * 2.2)
+                    + sin(sw * 0.5 + t * 0.7)
+                    + et * 1.3 * sin(r * 12 + ang * 2 - t * 3))
+        # the centerless family: lattices and fractal fields with no focal
+        # point — the whole panel is the subject, not a bullseye
+        if preset == 24:   # honeycomb — hex cell walls, drifting sideways
+            u = xs * (k1 * 0.9 + 1.5 * eb) + t * 0.35
+            vy = ys * (k1 * 0.9 + 1.5 * eb)
+            a1 = sin(u + t * 0.3)
+            a2 = sin(u * 0.5 + vy * 0.866 - t * 0.4)
+            a3 = sin(u * 0.5 - vy * 0.866 + t * 0.25)
+            hexg = np.abs(a1) + np.abs(a2) + np.abs(a3)
+            return (hexg * (1.4 + 1.6 * eb) - 2.2
+                    + em * sin((xs + ys) * 2 + t)
+                    + et * 0.8 * sin(xs * 7 - t * 2))
+        if preset == 25:   # fractal plasma — three octaves, no anchor
+            f, amp, acc = k1 * 0.7, 1.0, 0.0
+            for o in range(3):
+                acc = acc + amp * (sin(xs * f + t * (0.4 + 0.2 * o))
+                                   * sin(ys * f - t * (0.3 + 0.25 * o)))
+                f, amp = f * 1.9, amp * (0.55 + 0.3 * eb)
+            return acc * 2.2 + em * sin((xs - ys) * 3 + t * 0.8)
+        if preset == 26:   # drifting cells — voronoi-ish membranes
+            d = None
+            for i in range(5):
+                px = 1.6 * math.sin(t * (0.13 + 0.07 * i) + ph + i * 2.4)
+                py = 0.9 * math.cos(t * (0.11 + 0.06 * i) + i * 1.7)
+                di = np.sqrt((xs - px) ** 2 + (ys - py) ** 2)
+                d = di if d is None else np.minimum(d, di)
+            return (sin(d * (k2 + 6 * eb) - t * 1.4)
+                    + sin(d * 3.5 + t * 0.5)
+                    + em * sin((xs + ys) * 2.5 - t)
+                    + et * sin(d * 14 - t * 3))
+        # 27: dunes — warped ridges rolling across the panel
+        wx = xs + 1.1 * sin(ys * 1.3 + t * 0.5)
+        return (sin(wx * (k1 * 0.8 + 2 * eb) + ys * 1.5 - t * 0.9)
+                + sin(ys * k2 * 0.5 + sin(wx * 1.7 - t * 0.4) * 2)
+                + em * sin((wx + ys) * 3 + t * 0.7)
+                + et * 0.9 * sin(wx * 9 - t * 2.5))
 
     def _drop_lut(self):
         """64-entry palette: dark → primary → secondary → accent → white."""
@@ -2234,18 +2354,29 @@ class App:
             k = min(1.0, (10.0 if x > e else 2.4) * dt)
             self._drop_e[i] = e + (x - e) * k
         pulse, en, eb, em, et = self._drop_groove(raw, dt, now)
+        # ease the pulse with a short attack so the kick lands as a swell,
+        # not a single-frame jolt — keeps the punch, loses the jitter
+        ps = getattr(self, "_pulse_s", 0.0)
+        ps += (pulse - ps) * min(1.0, dt * 16.0)
+        self._pulse_s = ps
         self._drop_t += dt * getattr(self, "viz_speed", 1.0) * \
-            (0.55 + 1.1 * en + 1.6 * pulse)
+            (0.55 + 1.1 * en + 1.6 * ps)
         t = self._drop_t
 
         # aspect-correct coordinates: half-block pixels are ~square, so the
         # field stops stretching into smears on wide panels (rings stay round)
         aspect = min(W / max(H, 1), 4.5)   # cap so wide strips stay coherent
-        zoom = 1.15 / (1.0 + 0.16 * pulse)   # camera punches in on the kick
+        zoom = 1.15 / (1.0 + 0.16 * ps)    # camera swells in on the kick
         ys = np.linspace(-zoom, zoom, Hpx)[:, None]
         xs = np.linspace(-aspect * zoom, aspect * zoom, Wpx)[None, :]
-        r = np.sqrt(xs * xs + ys * ys) + 1e-6
-        ang = np.arctan2(ys, xs)
+
+        def coords(P):
+            # each preset roll carries its own origin — radial fields can
+            # live off-center instead of always orbiting the middle
+            x2 = xs - P.get("cx", 0.0)
+            y2 = ys - P.get("cy", 0.0)
+            return (x2, y2, np.sqrt(x2 * x2 + y2 * y2) + 1e-6,
+                    np.arctan2(y2, x2))
 
         # milkdrop-style preset switching: on a timer, or on a hard kick
         beat = pulse > 0.8 and now - self._drop_last_switch > 7
@@ -2257,7 +2388,8 @@ class App:
             self._drop_pa = self._drop_new_params()
             self._drop_mix = 0.0
             self._drop_last_switch = now
-            self._drop_switch_at = now + random.uniform(12, 24)
+            self._drop_switch_at = now + random.uniform(12, 24) / \
+                max(0.4, getattr(self, "viz_morph", 1.0))
 
         if self._drop_mix < 1.0:
             self._drop_mix = min(1.0, self._drop_mix + dt / 2.5)
@@ -2265,17 +2397,17 @@ class App:
             mx = mx * mx * (3 - 2 * mx)                # smoothstep crossfade
             va = self._drop_post(self._drop_field(
                 self._drop_prev, self._drop_pb,
-                xs, ys, r, ang, t, eb, em, et), self._drop_pb)
+                *coords(self._drop_pb), t, eb, em, et), self._drop_pb)
             vb = self._drop_post(self._drop_field(
                 self._drop_preset, self._drop_pa,
-                xs, ys, r, ang, t, eb, em, et), self._drop_pa)
+                *coords(self._drop_pa), t, eb, em, et), self._drop_pa)
             v = va * (1 - mx) + vb * mx
         else:
             v = self._drop_post(self._drop_field(
                 self._drop_preset, self._drop_pa,
-                xs, ys, r, ang, t, eb, em, et), self._drop_pa)
+                *coords(self._drop_pa), t, eb, em, et), self._drop_pa)
         # brightness: slow mood bed + a lift on the kick — no strobing
-        bright = min(1.0, 0.30 + 0.50 * min(1.0, en * 1.5) + 0.30 * pulse)
+        bright = min(1.0, 0.30 + 0.50 * min(1.0, en * 1.5) + 0.30 * ps)
         idx = np.clip((v * 63).astype(int), 0, 63)
         rgb = np.clip(self._drop_lut()[idx] * bright, 0, 255)
         if ss > 1:
@@ -2379,9 +2511,10 @@ class App:
         if self.status and time.time() - self.status_t < 4:
             return crop_pad("  " + fg(ORANGE) + self.status + RESET, w)
         if self.viz_max:
-            keys = [("F", "exit"), ("v", "viz"), ("c", "theme"),
-                    ("p", "hd"), ("spc", "pause"), ("n/b", "skip"),
-                    ("L", "like"), ("±", "vol"), ("q", "quit")]
+            keys = [("F", "exit"), ("M", "tune"), ("v", "viz"),
+                    ("c", "theme"), ("p", "px"), ("spc", "pause"),
+                    ("n/b", "skip"), ("L", "like"), ("±", "vol"),
+                    ("q", "quit")]
         elif self.full:
             keys = [("f", "exit full"), ("spc", "pause"), ("n/b", "skip"),
                     ("v", "viz"), ("c", "theme"), ("p", "hd"),
@@ -2389,7 +2522,8 @@ class App:
         else:
             keys = [("/", "find"), ("↵", "play"), ("spc", "pause"),
                     ("n/b", "skip"), ("q", "quit"), ("f", "full"),
-                    ("F", "max viz"), ("v", "viz"), ("c", "theme"), ("w", "work"),
+                    ("F", "max viz"), ("M", "tune"), ("v", "viz"),
+                    ("c", "theme"), ("w", "work"),
                     ("a", "+queue"), ("A", "→playlist"), ("N", "new pl"),
                     ("x", "remove"), ("L", "like"), (",/.", "seek"),
                     ("±", "vol"), ("s", "shuf"), ("r", "rep"),

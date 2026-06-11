@@ -74,7 +74,7 @@ guest mode.
 | `v` | cycle visualizer | `c` | cycle color theme |
 | `w` | work mode (no art) | `f` | fullscreen |
 | `p` | pixel quality: chunky / hi-def / silk | `F` | maximize the visualizer |
-| `[` / `]` | beat punch −/+ | `{` / `}` | flow speed −/+ |
+| `M` | tuning menu (sliders) | `[` `]` `{` `}` | beat punch / flow speed |
 | `1`-`4` / `tab` | switch view | `esc` / `h` | back out of playlist |
 | `q` | quit | | |
 
@@ -83,7 +83,8 @@ guest mode.
 - the spectrum is 45 Hz to 11 kHz, log-spaced, with auto gain. bars have
   gravity and peak caps like cava. if there's no pulse/pipewire monitor to
   grab it falls back to a decorative wave.
-- the `drop` visualizer cycles through 24 field equations milkdrop-style,
+- the `drop` visualizer cycles through 28 field equations milkdrop-style
+  (radial, lattice, honeycomb, fractal — many roll an off-center origin),
   crossfading every 12–24s or early when the bass hits hard. `p` cycles
   pixel quality: chunky half-blocks, hi-def quadrants, or silk — the field
   rendered 4× oversampled and averaged down, for smooth gradients if you
@@ -91,7 +92,9 @@ guest mode.
 - the plasma is beat-locked: it tracks bass kicks and the song's tempo,
   so the field punches in on the beat and bobs with the groove instead of
   flickering at every spectrum wiggle. `[` `]` tune how hard the beat
-  hits, `{` `}` tune the base flow speed — both stick across restarts.
+  hits, `{` `}` tune the base flow speed — or just press `M` for a
+  slider menu (beat punch, flow speed, morph speed, pixel quality) that
+  floats over the running visualizer. everything sticks across restarts.
   `F` hands the whole terminal to the visualizer.
 - you can embed the visualizer in an [eww](https://github.com/elkowar/eww)
   widget — see [docs/EWW-WIDGET.md](docs/EWW-WIDGET.md).
