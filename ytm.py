@@ -1935,18 +1935,40 @@ class App:
         c = lerp(RED, PINK, 0.5 + 0.5 * math.sin(t * 9))
         pix = self._heart_mask(rows, cols, s)
         # the heart burns: flame tongues lick up from the crown in the
-        # complement of whatever color the heart is pulsing through
+        # complement of whatever color the heart is pulsing through.
+        # the grid grows upward (stealing rows above the heart) so the
+        # fire has headroom, with a hot inner core and stray sparks
         comp = (255 - c[0], 255 - c[1], 255 - c[2])
-        crown = pix.argmax(axis=0)               # first lit pixel per col
-        ci = np.arange(pix.shape[1])
-        flick = np.abs(np.sin(ci * 1.7 + t * 12) * np.sin(ci * 0.61 - t * 8.5))
-        fh = (1 + flick * 5 * s).astype(int)     # tongue heights, flickering
-        flame = np.zeros_like(pix)
-        for x in np.where(pix.any(axis=0))[0]:
-            if crown[x] > 0:
-                flame[max(0, crown[x] - fh[x]):crown[x], x] = True
-        self._stamp_pixels(out, w, flame, band0, pad_l, fg(comp))
-        self._stamp_pixels(out, w, pix, band0, pad_l, fg(c))
+        up = max(0, min(3, band0 - 1))           # cell rows of headroom
+        hr = up * 2
+        grid = np.vstack([np.zeros((hr, pix.shape[1]), bool), pix])
+        b0 = band0 - up
+        crown = grid.argmax(axis=0)              # first lit pixel per col
+        ci = np.arange(grid.shape[1])
+        n1 = 0.5 + 0.5 * np.sin(ci * 1.9 - t * 13)
+        n2 = 0.5 + 0.5 * np.sin(ci * 0.57 + t * 7.3)
+        n3 = 0.5 + 0.5 * np.sin(ci * 3.1 + t * 21)
+        flick = n1 * n2 * 0.7 + n3 * 0.3
+        fh = (2 + flick * 9 * s).astype(int)     # tongue heights
+        outer = np.zeros_like(grid)
+        inner = np.zeros_like(grid)
+        for x in np.where(grid.any(axis=0))[0]:
+            top = crown[x]
+            if top <= 0:
+                continue
+            f = min(int(fh[x]), top)
+            outer[top - f:top, x] = True
+            # ragged tips: the topmost pixel of a tall tongue blinks
+            if f > 2 and math.sin(x * 5.3 + t * 27) < -0.25:
+                outer[top - f, x] = False
+            inner[top - max(1, int(f * 0.45)):top, x] = True
+            # a spark breaks free when the flicker peaks
+            if n3[x] > 0.9 and top - f - 2 >= 0:
+                outer[top - f - 2, x] = True
+        self._stamp_pixels(out, w, outer, b0, pad_l, fg(comp))
+        self._stamp_pixels(out, w, inner, b0, pad_l,
+                           fg(lerp(comp, WHITE, 0.55)))
+        self._stamp_pixels(out, w, grid, b0, pad_l, fg(c))
         if t > 0.25:
             self._splash_label(out, w, band0 + rows, "LIKED", t,
                                (RED, ORANGE, PINK), 0.3)
@@ -2732,6 +2754,11 @@ class App:
                     tick = 0.04
                 else:
                     tick = 0.12
+                # while keys are streaming (held scroll), outpace the
+                # keyboard repeat rate so every frame handles exactly one
+                # key — smooth motion AND nothing left to backlog
+                if time.time() - getattr(self, "_key_t", 0.0) < 0.4:
+                    tick = min(tick, 0.012)
                 # constant cadence: sleep what's left of the tick after
                 # the last render, so frame intervals don't see-saw
                 # between tick and tick+render — that wobble reads as
@@ -2741,10 +2768,10 @@ class App:
                 drained = 0
                 while k and self.running:
                     self.handle_key(k)
-                    # drain everything already queued before drawing —
-                    # held keys repeat faster than a frame renders, and
-                    # one-key-per-frame turns the leftovers into ghost
-                    # scrolling after the key is released
+                    self._key_t = time.time()
+                    # drain anything already queued before drawing —
+                    # held keys repeating faster than a frame renders
+                    # would otherwise replay as ghost scrolling later
                     drained += 1
                     k = self.read_key(0) if drained < 64 else None
                 t0 = time.perf_counter()
