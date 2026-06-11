@@ -126,6 +126,64 @@ def crop_pad(s, w):
     return "".join(out) + " " * (w - vis)
 
 
+def ansi_cells(s, w):
+    """Explode an ANSI string into w (sgr_prefix, char) cells so overlays
+    can replace individual columns without nuking the colors around them.
+    Wide chars take two cells; the second is a "" continuation."""
+    cells, cur, i = [], "", 0
+    while i < len(s) and len(cells) < w:
+        m = ANSI_RE.match(s, i)
+        if m:
+            g = m.group()
+            cur = "" if g == RESET else cur + g
+            i = m.end()
+            continue
+        ch = s[i]
+        cells.append((cur, ch))
+        if char_w(ch) == 2 and len(cells) < w:
+            cells.append((cur, ""))
+        i += 1
+    while len(cells) < w:
+        cells.append(("", " "))
+    return cells
+
+
+def put_cell(cells, i, sgr, ch):
+    if i < 0 or i >= len(cells):
+        return
+    if cells[i][1] == "":                       # tail of a wide char
+        cells[i - 1] = ("", " ")
+    elif i + 1 < len(cells) and cells[i + 1][1] == "":
+        cells[i + 1] = ("", " ")                # head of a wide char
+    cells[i] = (sgr, ch)
+
+
+def sgr_to_bg(sgr):
+    """Best-guess background code for a cell's SGR prefix — its own bg if
+    set, else its fg recolored as bg. Lets half-block overlays blend with
+    whatever they're stamped on instead of flashing terminal-black."""
+    mb = re.search(r"\x1b\[48;2;([0-9;]+)m", sgr)
+    if mb:
+        return "\x1b[48;2;" + mb.group(1) + "m"
+    mf = re.search(r"\x1b\[38;2;([0-9;]+)m", sgr)
+    if mf:
+        return "\x1b[48;2;" + mf.group(1) + "m"
+    return ""
+
+
+def cells_to_str(cells):
+    out, cur = [], None
+    for sgr, ch in cells:
+        if ch == "":
+            continue
+        if sgr != cur:
+            out.append(RESET + sgr)
+            cur = sgr
+        out.append(ch)
+    out.append(RESET)
+    return "".join(out)
+
+
 def fmt_time(secs):
     if secs is None or secs < 0:
         return "-:--"
@@ -1565,9 +1623,10 @@ class App:
         return out
 
     def _like_splash(self, out, w, t):
-        """Big pulsing heart stamped over the panel right after a like.
-        The shape is the classic (x²+y²−1)³ = x²y³ curve, scaled up as
-        it pops in, colored with a red↔pink pulse."""
+        """Big pulsing heart composited over the panel right after a like.
+        The shape is the classic (x²+y²−1)³ = x²y³ curve, scaled up as it
+        pops in, colored with a theme pulse. Everything around the curve
+        stays transparent so the panel keeps living underneath."""
         import numpy as np
         h = len(out)
         rows = min(14, max(6, h - 6))
@@ -1584,22 +1643,37 @@ class App:
             if band0 + r >= h - 1:
                 break
             top, bot = inside[r * 2], inside[r * 2 + 1]
-            cells = []
+            cells = ansi_cells(out[band0 + r], w)
             for i in range(cols):
                 if top[i] and bot[i]:
-                    cells.append("█")
-                elif top[i]:
-                    cells.append("▀")
-                elif bot[i]:
-                    cells.append("▄")
-                else:
-                    cells.append(" ")
-            out[band0 + r] = crop_pad(
-                " " * pad_l + col + "".join(cells) + RESET, w)
+                    put_cell(cells, pad_l + i, col, "█")
+                elif top[i] or bot[i]:
+                    # edge cell — paint the empty half with whatever color
+                    # is underneath so the curve has no black fringe
+                    under = sgr_to_bg(cells[pad_l + i][0])
+                    put_cell(cells, pad_l + i, under + col,
+                             "▀" if top[i] else "▄")
+            out[band0 + r] = cells_to_str(cells)
         if band0 + rows < h - 1 and t > 0.25:
-            label = "L I K E D"
-            out[band0 + rows] = crop_pad(
-                BOLD + fg(WHITE) + f"{label:^{w}}" + RESET, w)
+            # L I K E D — each letter shakes and flashes through the theme
+            label = "LIKED"
+            theme = (RED, ORANGE, PINK)
+            span = len(label) * 4 - 3
+            x0 = (w - span) // 2
+            two_rows = band0 + rows + 1 < h - 1
+            lines = {0: ansi_cells(out[band0 + rows], w)}
+            if two_rows:
+                lines[1] = ansi_cells(out[band0 + rows + 1], w)
+            for i, ch in enumerate(label):
+                cc = theme[int(t * 12 + i) % len(theme)]
+                jx = random.randint(-1, 1)
+                jy = 1 if two_rows and random.random() < 0.3 else 0
+                x = x0 + i * 4 + jx
+                under = sgr_to_bg(lines[jy][x][0]) if 0 <= x < w else ""
+                put_cell(lines[jy], x, under + BOLD + fg(cc), ch)
+            out[band0 + rows] = cells_to_str(lines[0])
+            if two_rows:
+                out[band0 + rows + 1] = cells_to_str(lines[1])
         return out
 
     def _viz_color(self, hfrac):
