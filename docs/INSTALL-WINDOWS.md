@@ -1,4 +1,4 @@
-# Installing ytm on Windows — the no-experience guide
+# Installing NOCTURNE (ytm) on Windows — the no-experience guide
 
 This is a music player that runs inside a black text window. It was built for
 Linux, so on Windows we first turn on a small built-in Linux feature called
@@ -68,7 +68,7 @@ Next, get the player itself and run its installer — paste this block and Enter
 ```sh
 sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 sudo chmod a+rx /usr/local/bin/yt-dlp
-git clone https://github.com/jprouhana/ytm-tui ~/ytm-tui
+git clone https://github.com/jprouhana/nocturne ~/ytm-tui
 cd ~/ytm-tui
 ./install.sh
 ```

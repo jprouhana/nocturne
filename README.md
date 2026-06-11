@@ -56,7 +56,7 @@ On a Mac, one line does everything (Homebrew, deps, clone, launcher,
 sign-in — it even offers the visualizer's loopback driver):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jprouhana/ytm-tui/main/install-macos.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jprouhana/nocturne/main/install-macos.sh | sh
 ```
 
 On Linux you need `mpv`, `yt-dlp` and `ffmpeg` on your system. On Arch:
@@ -68,8 +68,8 @@ sudo pacman -S mpv yt-dlp ffmpeg
 Then:
 
 ```sh
-git clone https://github.com/jprouhana/ytm-tui
-cd ytm-tui
+git clone https://github.com/jprouhana/nocturne
+cd nocturne
 ./install.sh
 ```
 
@@ -146,8 +146,9 @@ kept unless you say otherwise).
 - soundcloud results appear a few seconds after the YT ones — each one
   is verified playable first (major-label uploads there are DRM-locked,
   so those get filtered out instead of failing when you hit enter).
-  likes/playlists are YT-side only, so `L` and `A` politely decline on
-  `☁` tracks.
+  signed in via `--sc-login`, `L` likes on soundcloud itself and your
+  ☁ sets appear under Playlists; YT playlists can't hold ☁ tracks, so
+  `A` declines politely there.
 - the spectrum is 45 Hz to 11 kHz, log-spaced, with auto gain. bars have
   gravity and peak caps like cava. if there's no pulse/pipewire monitor to
   grab it falls back to a decorative wave.

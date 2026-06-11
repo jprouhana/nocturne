@@ -1,4 +1,4 @@
-# ytm on macOS
+# NOCTURNE (ytm) on macOS
 
 Everything works on a Mac — playback, your library, the visualizers,
 even the true-pixel `drop` rendering if your terminal speaks the kitty
@@ -11,14 +11,14 @@ offers BlackHole, clones to `~/.ytm-tui`, sets up the launcher and
 offers sign-in):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jprouhana/ytm-tui/main/install-macos.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jprouhana/nocturne/main/install-macos.sh | sh
 ```
 
 Or by hand:
 
 ```sh
 brew install mpv yt-dlp ffmpeg
-git clone https://github.com/jprouhana/ytm-tui
+git clone https://github.com/jprouhana/nocturne
 cd ytm-tui
 ./install.sh
 ytm setup

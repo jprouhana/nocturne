@@ -1,7 +1,7 @@
 #!/bin/sh
 # ytm — one-line macOS install:
 #
-#   curl -fsSL https://raw.githubusercontent.com/jprouhana/ytm-tui/main/install-macos.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/jprouhana/nocturne/main/install-macos.sh | sh
 #
 # Installs Homebrew if you don't have it, the three system deps, offers
 # the BlackHole loopback driver (so the visualizer hears real audio),
@@ -10,7 +10,7 @@ set -e
 
 if [ "$(uname)" != "Darwin" ]; then
     echo "this bootstrap is for macOS — on linux see the README:"
-    echo "  https://github.com/jprouhana/ytm-tui#install"
+    echo "  https://github.com/jprouhana/nocturne#install"
     exit 1
 fi
 
@@ -52,7 +52,7 @@ if [ -d "$dir/.git" ]; then
     git -C "$dir" pull --ff-only
 else
     echo "→ cloning to $dir"
-    git clone --depth 1 https://github.com/jprouhana/ytm-tui "$dir"
+    git clone --depth 1 https://github.com/jprouhana/nocturne "$dir"
 fi
 
 cd "$dir"
