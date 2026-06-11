@@ -80,6 +80,7 @@ guest mode.
 | `w` | work mode (no art) | `f` | fullscreen |
 | `p` | pixel quality: chunky / hi-def / pixel | `F` | maximize the visualizer |
 | `M` | tuning menu (sliders) | `[` `]` `{` `}` | beat punch / flow speed |
+| `t` | album art over the visualizer | | |
 | `1`-`4` / `tab` | switch view | `esc` / `h` | back out of playlist |
 | `q` | quit | | |
 

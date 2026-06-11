@@ -967,6 +967,7 @@ class App:
         self.menu = False         # M: slider overlay for all of the above
         self.menu_sel = 0
         self.rich_search = int(state.get("rich_search", 1))
+        self.viz_art = int(state.get("viz_art", 0))
         self.full = False
         self.viz_max = False      # F: visualizer owns the whole terminal
         self.liked_now = False
@@ -1012,6 +1013,7 @@ class App:
                            "viz_speed": self.viz_speed,
                            "viz_morph": self.viz_morph,
                            "rich_search": self.rich_search,
+                           "viz_art": self.viz_art,
                            "theme": THEMES[self.theme_i][0]}, f)
         except Exception:
             pass
@@ -1572,6 +1574,10 @@ class App:
             self.menu_sel = 0
         elif k == "ESC" and self.viz_max:
             self.viz_max = False
+        elif k == "t":
+            self.viz_art = 1 - getattr(self, "viz_art", 0)
+            self.say("album art over the visualizer"
+                     if self.viz_art else "art overlay off")
         elif k == "p":
             self.drop_px = (self.drop_px + 1) % (3 if self._kitty_ok else 2)
             self.say(["drop: chunky pixels", "drop: hi-def pixels",
@@ -1852,6 +1858,7 @@ class App:
              0, 2 if self._kitty_ok else 1, 1,
              ("chunky", "hi-def", "pixel")),
             ("rich search", "rich_search", 0, 1, 1, ("off", "on")),
+            ("art overlay", "viz_art", 0, 1, 1, ("off", "on")),
         ]
 
     def _render_menu_overlay(self, lines, w):
@@ -2218,7 +2225,34 @@ class App:
     def _render_visualizer(self, w, rows):
         # every style renders fresh every tick now — the bar physics are
         # time-based, so high fps just means smoother, not twitchier
-        return self._render_visualizer_now(w, rows)
+        lines = self._render_visualizer_now(w, rows)
+        if (getattr(self, "viz_art", 0)
+                and self.viz_style in ("drop", "cover")
+                and self.now and getattr(self.now, "thumb", "")
+                and rows >= 8):
+            lines = self._overlay_art(lines, w, rows)
+        return lines
+
+    def _overlay_art(self, lines, w, rows):
+        """t: the album cover floats over the plasma — the field keeps
+        dancing around it as a generative backdrop."""
+        ah = min(max(4, int(rows * 0.62)), rows - 2)
+        aw = min(ah * 2, w - 10)
+        ah = max(4, aw // 2)
+        art = self.art.get(self.now.thumb, aw, ah)
+        if not art:
+            return lines                  # still downloading — next frame
+        top = max(1, (rows - ah) // 2)
+        left = (w - aw) // 2
+        for r, al in enumerate(art[:ah]):
+            if top + r >= len(lines):
+                break
+            cells = ansi_cells(lines[top + r], w)
+            for i, (sgr, ch) in enumerate(ansi_cells(al, aw)):
+                if ch:
+                    put_cell(cells, left + i, sgr, ch)
+            lines[top + r] = cells_to_str(cells)
+        return lines
 
     def _render_visualizer_now(self, w, rows):
         if getattr(self, "eww_flush", False):
@@ -2997,7 +3031,7 @@ class App:
             return crop_pad("  " + fg(ORANGE) + self.status + RESET, w)
         if self.viz_max:
             keys = [("F", "exit"), ("M", "tune"), ("v", "viz"),
-                    ("c", "theme"), ("p", "px"), ("spc", "pause"),
+                    ("c", "theme"), ("p", "px"), ("t", "art"), ("spc", "pause"),
                     ("n/b", "skip"), ("L", "like"), ("±", "vol"),
                     ("q", "quit")]
         elif self.full:
