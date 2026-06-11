@@ -75,7 +75,13 @@ Auth lands in `~/.config/ytm-tui/browser.json`, chmod 600, and never leaves
 your machine. Skipping sign-in is fine too — search and playback work in
 guest mode.
 
-`ytm --doctor` checks that everything is wired up.
+`ytm --doctor` checks that everything is wired up — including whether
+your terminal speaks the kitty graphics protocol and what cell size the
+pixel renderer will use.
+
+`ytm update` pulls the latest version and refreshes yt-dlp; the app also
+checks GitHub once per launch and shows an ↑ badge when there's something
+new.
 
 ## keys
 

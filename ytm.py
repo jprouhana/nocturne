@@ -7,6 +7,7 @@ True-color half-block album art, animated visualizer, gradient UI.
 Usage:
   ytm                 launch the TUI
   ytm setup           guided setup: deps, sign-in, theme, visualizer
+  ytm update          pull the latest version + refresh yt-dlp
   ytm --auth          sign in by pasting request headers from music.youtube.com
   ytm --oauth         sign in with a YouTube-scoped OAuth token (no cookies)
   ytm --login         interactive sign-in wizard (pick your browser)
@@ -1100,6 +1101,7 @@ class App:
         self._pls_fetched = False
         self.size = shutil.get_terminal_size()
         signal.signal(signal.SIGWINCH, self._winch)
+        self._update_check()
 
     # ── persistence ──────────────────────────────────────────────────────────
     def _load_state(self):
@@ -1147,6 +1149,29 @@ class App:
         return self.queue
 
     # ── data fetching (background threads) ───────────────────────────────────
+    def _update_check(self):
+        """Quietly look for new commits on GitHub once per launch; the
+        header grows an ↑ badge and the status line says how to update."""
+        def work():
+            try:
+                here = os.path.dirname(os.path.abspath(__file__))
+                if not os.path.isdir(os.path.join(here, ".git")):
+                    return
+                subprocess.run(["git", "-C", here, "fetch", "--quiet"],
+                               capture_output=True, timeout=20)
+                r = subprocess.run(
+                    ["git", "-C", here, "rev-list", "--count", "HEAD..@{u}"],
+                    capture_output=True, text=True, timeout=5)
+                n = int(r.stdout.strip() or 0)
+                if n > 0:
+                    self._update_n = n
+                    self.say(f"ytm update available ({n} new commit"
+                             f"{'s' if n > 1 else ''}) — quit and run: "
+                             "ytm update")
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
     def _auth_refresh(self):
         """Google rotates session cookies; quietly re-import a fresh set
         from the browser and rebuild the client. OAuth tokens refresh
@@ -1392,6 +1417,8 @@ class App:
                 try:
                     self.yt.rate_song(self.now.video_id, "INDIFFERENT")
                     self.say(f"♡ unliked: {self.now.title}")
+                    if self._lib_fetched:
+                        self._lib_refresh()
                 except Exception as e:
                     self.say(f"unlike failed: {e}")
             threading.Thread(target=work, daemon=True).start()
@@ -1404,11 +1431,51 @@ class App:
                 self.yt.rate_song(self.now.video_id, "LIKE")
                 self.liked_now = True
                 self.say(f"♥ liked: {self.now.title}")
+                if self._lib_fetched:
+                    self._lib_refresh()
             except Exception as e:
                 self.say(f"like failed: {e}")
         threading.Thread(target=work, daemon=True).start()
 
     # ── library write ops ────────────────────────────────────────────────────
+    def _pl_refresh(self):
+        """Quietly re-pull the open playlist so it tracks reality."""
+        pl = self.pl_open
+        if not (self.authed and pl):
+            return
+
+        def work():
+            try:
+                data = self._lib_call(
+                    lambda: self.yt.get_playlist(pl.playlist_id, limit=300))
+                tracks = [Track.from_item(t)
+                          for t in data.get("tracks", [])
+                          if t and t.get("videoId")]
+                if self.pl_open and \
+                        self.pl_open.playlist_id == pl.playlist_id:
+                    self.pl_tracks = tracks
+                    self.sel[2] = min(self.sel[2], max(len(tracks) - 1, 0))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _lib_refresh(self):
+        """Quietly re-pull liked songs (likes land here live)."""
+        if not self.authed:
+            return
+
+        def work():
+            try:
+                data = self._lib_call(
+                    lambda: self.yt.get_liked_songs(limit=300))
+                self.lib = [Track.from_item(t)
+                            for t in data.get("tracks", [])
+                            if t.get("videoId")]
+                self.sel[1] = min(self.sel[1], max(len(self.lib) - 1, 0))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
     def create_playlist(self, name):
         def work():
             try:
@@ -1453,6 +1520,12 @@ class App:
                     self.yt.add_playlist_items(pl.playlist_id,
                                                [track.video_id])
                 self.say(f"✚ {track.title} → {pl.title}")
+                self._pls_fetched = False        # counts changed
+                if pl.playlist_id == "LM":
+                    self._lib_refresh()
+                elif self.pl_open and \
+                        self.pl_open.playlist_id == pl.playlist_id:
+                    self._pl_refresh()
             except Exception as e:
                 self.say(f"add failed: {e}")
         threading.Thread(target=work, daemon=True).start()
@@ -1474,6 +1547,7 @@ class App:
                     self.lib.remove(track)
                 self.sel[1] = min(self.sel[1], max(len(self.lib) - 1, 0))
                 self.say(f"♡ unliked: {track.title}")
+                self._lib_refresh()
             except Exception as e:
                 self.say(f"unlike failed: {e}")
         threading.Thread(target=work, daemon=True).start()
@@ -1499,6 +1573,8 @@ class App:
                 self.sel[2] = min(self.sel[2],
                                   max(len(self.pl_tracks) - 1, 0))
                 self.say(f"✗ removed from {pl.title}: {track.title}")
+                self._pls_fetched = False        # counts changed
+                self._pl_refresh()
             except Exception as e:
                 self.say(f"remove failed: {e}")
         threading.Thread(target=work, daemon=True).start()
@@ -1781,6 +1857,8 @@ class App:
     def _render_header(self, w):
         acct = (fg(GREEN) + "● signed in" if self.authed
                 else fg(GREY) + "○ guest — run: ytm --login")
+        if getattr(self, "_update_n", 0):
+            acct = fg(ORANGE) + BOLD + "↑ ytm update" + RESET + "  " + acct
         if self.work:
             acct = fg(GREY) + "▪ work  " + acct
         tabs = []
@@ -2755,9 +2833,14 @@ class App:
         return any(t in (term + " " + prog).lower()
                    for t in ("kitty", "ghostty", "wezterm"))
 
-    @staticmethod
-    def _cell_px():
-        """Cell size in screen pixels (for pixel-perfect rendering)."""
+    def _cell_px(self):
+        """Cell size in real screen pixels (for pixel-perfect rendering).
+        Prefers the terminal's own CSI 16t answer — macOS reports zeros
+        or Retina *points* through TIOCGWINSZ, which renders the bitmap
+        at half resolution and looks chunky-blurry scaled back up."""
+        q = getattr(self, "_cellpx_q", None)
+        if q:
+            return q
         try:
             r, c, xp, yp = struct.unpack(
                 "HHHH", fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
@@ -2766,6 +2849,28 @@ class App:
         except OSError:
             pass
         return 10, 20
+
+    def _query_cellpx(self, fd):
+        """Ask the terminal for its true cell pixel size (CSI 16t).
+        Runs once at startup, inside raw mode."""
+        try:
+            sys.stdout.write("\x1b[16t")
+            sys.stdout.flush()
+            buf = ""
+            end = time.time() + 0.25
+            while time.time() < end:
+                r, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if not r:
+                    continue
+                buf += os.read(fd, 64).decode("ascii", "ignore")
+                m = re.search(r"\x1b\[6;(\d+);(\d+)t", buf)
+                if m:
+                    hh, ww = int(m.group(1)), int(m.group(2))
+                    if ww > 1 and hh > 2:
+                        self._cellpx_q = (ww, hh)
+                    return
+        except Exception:
+            pass
 
     def _drop_kitty(self, idxf, Wpx, Hpx, W, rows, pad, bright, w):
         """Blit the field as a true RGB bitmap (kitty graphics protocol).
@@ -3195,6 +3300,7 @@ class App:
             attrs = termios.tcgetattr(fd)
             attrs[1] |= termios.OPOST | termios.ONLCR
             termios.tcsetattr(fd, termios.TCSANOW, attrs)
+            self._query_cellpx(fd)
             while self.running:
                 if self.eof_flag.is_set():
                     self.eof_flag.clear()
@@ -3202,6 +3308,15 @@ class App:
                 if self.now and time.time() - self._now_wt > 2:
                     self._now_wt = time.time()
                     self._write_now()
+                # live lists: the visible playlist/library quietly
+                # re-pulls so edits from other devices appear on their own
+                if self.authed and \
+                        time.time() - getattr(self, "_live_t", 0.0) > 45:
+                    self._live_t = time.time()
+                    if self.tab == 2 and self.pl_open:
+                        self._pl_refresh()
+                    elif self.tab == 1 and self._lib_fetched:
+                        self._lib_refresh()
                 # the plasma runs flat out (~125 fps tick, render cost is
                 # the real ceiling), every other style at 60; idle screen
                 # is lazier
@@ -3379,6 +3494,42 @@ def doctor():
         except ImportError:
             print(f"  ✗ python:{mod} MISSING")
             ok = False
+    term = os.environ.get("TERM", "?")
+    prog = os.environ.get("TERM_PROGRAM", "")
+    gfx = App._kitty_sniff()
+    print(f"  {'✓' if gfx else '○'} terminal {term}"
+          + (f" ({prog})" if prog else "")
+          + ("" if gfx else " — no kitty graphics, pixel mode off"))
+    try:
+        r, c, xp, yp = struct.unpack(
+            "HHHH", fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
+        cell = f"{xp // c}x{yp // r}px/cell" if (xp and yp) else "unreported"
+        print(f"  · TIOCGWINSZ: {c}x{r} cells, {cell}")
+    except OSError:
+        pass
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        fdd = sys.stdin.fileno()
+        old_t = termios.tcgetattr(fdd)
+        try:
+            tty.setcbreak(fdd)
+            sys.stdout.write("\x1b[16t")
+            sys.stdout.flush()
+            buf, end = "", time.time() + 0.3
+            while time.time() < end:
+                rr, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if rr:
+                    buf += os.read(fdd, 64).decode("ascii", "ignore")
+                    m = re.search(r"\x1b\[6;(\d+);(\d+)t", buf)
+                    if m:
+                        print(f"  · terminal reports {m.group(2)}x"
+                              f"{m.group(1)}px/cell (CSI 16t) — "
+                              "pixel mode uses this")
+                        break
+            else:
+                print("  · no CSI 16t reply — pixel mode falls back to "
+                      "TIOCGWINSZ")
+        finally:
+            termios.tcsetattr(fdd, termios.TCSADRAIN, old_t)
     if os.path.isfile(OAUTH_FILE):
         print(f"  {'✓' if verify_auth() else '✗'} oauth ({OAUTH_FILE})")
     elif os.path.isfile(AUTH_FILE):
@@ -3386,6 +3537,27 @@ def doctor():
     else:
         print("  ○ no auth file — guest mode (search/play only)")
     return ok
+
+
+def self_update():
+    """ytm update — pull the latest code and refresh the fragile deps."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.isdir(os.path.join(here, ".git")):
+        print("✗ this install isn't a git checkout — reinstall via the")
+        print("  README (or the macOS one-liner) to get updates")
+        return False
+    print("→ pulling latest ytm")
+    r = subprocess.run(["git", "-C", here, "pull", "--ff-only"],
+                       capture_output=True, text=True)
+    out = (r.stdout + r.stderr).strip()
+    print("  " + out.replace("\n", "\n  "))
+    if r.returncode != 0:
+        return False
+    print("→ refreshing yt-dlp + ytmusicapi (stale yt-dlp = broken playback)")
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+                    "--upgrade", "yt-dlp", "ytmusicapi"], check=False)
+    print("✓ up to date — restart ytm")
+    return True
 
 
 def setup_wizard():
@@ -3450,8 +3622,9 @@ def setup_wizard():
 
 def main():
     ap = argparse.ArgumentParser(prog="ytm", description=__doc__)
-    ap.add_argument("cmd", nargs="?", choices=["setup"],
-                    help="ytm setup — guided first-run setup")
+    ap.add_argument("cmd", nargs="?", choices=["setup", "update"],
+                    help="ytm setup — guided first-run setup; "
+                         "ytm update — pull the latest version")
     ap.add_argument("--login", action="store_true",
                     help="interactive sign-in wizard (pick your browser)")
     ap.add_argument("--setup", action="store_true",
@@ -3483,6 +3656,8 @@ def main():
 
     if args.cmd == "setup" or args.setup:
         sys.exit(0 if setup_wizard() else 1)
+    if args.cmd == "update":
+        sys.exit(0 if self_update() else 1)
     if args.doctor:
         sys.exit(0 if doctor() else 1)
     if args.eww:
