@@ -3572,6 +3572,11 @@ def doctor():
     print(f"  {'✓' if gfx else '○'} terminal {term}"
           + (f" ({prog})" if prog else "")
           + ("" if gfx else " — no kitty graphics, pixel mode off"))
+    if not gfx:
+        hint = ("brew install --cask ghostty"
+                if sys.platform == "darwin" else "ghostty, kitty or wezterm")
+        print(f"    → for the true-pixel renderer: {hint}, then run ytm "
+              "inside it")
     try:
         r, c, xp, yp = struct.unpack(
             "HHHH", fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
