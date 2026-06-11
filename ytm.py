@@ -6,6 +6,7 @@ True-color half-block album art, animated visualizer, gradient UI.
 
 Usage:
   ytm                 launch the TUI
+  ytm setup           guided setup: deps, sign-in, theme, visualizer
   ytm --auth          sign in by pasting request headers from music.youtube.com
   ytm --login         interactive sign-in wizard (pick your browser)
   ytm --auth-firefox  import your session from Firefox's cookie store
@@ -529,6 +530,57 @@ class ArtCache:
                          daemon=True).start()
         return None
 
+    def palette(self, url):
+        """64-color gradient pulled from the artwork (dark → bright),
+        ready to drive the drop renderer. None while it's still loading."""
+        if not url:
+            return None
+        with self._lock:
+            if url in getattr(self, "_pal", {}):
+                return self._pal[url]
+            if not hasattr(self, "_pal"):
+                self._pal = {}
+            pkey = ("pal", url)
+            if pkey in self._fetching:
+                return None
+            self._fetching.add(pkey)
+        threading.Thread(target=self._fetch_pal, args=(url,),
+                         daemon=True).start()
+        return None
+
+    def _fetch_pal(self, url):
+        try:
+            from PIL import Image
+            import io
+            import numpy as np
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            raw = urllib.request.urlopen(req, timeout=10).read()
+            img = Image.open(io.BytesIO(raw)).convert("RGB").resize((32, 32))
+            arr = np.asarray(img).reshape(-1, 3).astype(np.float32)
+            lum = arr @ np.float32([0.299, 0.587, 0.114])
+            order = np.argsort(lum)
+            # anchors at luminance ranks, window-averaged so one weird
+            # pixel can't hijack a stop; floor the dark end for contrast
+            stops, n = [], len(order)
+            for q in (0.04, 0.30, 0.58, 0.82, 0.97):
+                i = int(q * (n - 1))
+                wnd = arr[order[max(0, i - 16):i + 16]]
+                stops.append(wnd.mean(axis=0))
+            stops[0] = stops[0] * 0.35
+            pos = [0.0, 0.34, 0.60, 0.82, 1.0]
+            lut = np.zeros((64, 3), np.float32)
+            for i in range(64):
+                t = i / 63
+                a = max(j for j in range(5) if pos[j] <= t or j == 0)
+                a = min(a, 3)
+                f = (t - pos[a]) / (pos[a + 1] - pos[a])
+                lut[i] = stops[a] + (stops[a + 1] - stops[a]) * min(1.0, f)
+            with self._lock:
+                self._pal[url] = lut
+        except Exception:
+            with self._lock:
+                self._fetching.discard(("pal", url))
+
     def _fetch(self, url, w, h):
         key = (url, w, h)
         try:
@@ -758,7 +810,7 @@ def verify_auth():
 
 TABS = ["Search", "Library", "Playlists", "Queue"]
 BLOCKS = " ▁▂▃▄▅▆▇█"
-VIZ_STYLES = ["bars", "mirror", "scope", "bands", "drop"]
+VIZ_STYLES = ["bars", "mirror", "scope", "bands", "drop", "cover"]
 BADGE = ["█▙  ", "███▙", "█▛  "]
 LOGO = [
     "█▖ ▗█ ▀▀█▀▀   █▀▄▀█ █   █ ▗█▀▀▀ ▀█▀ ▗█▀▀",
@@ -876,6 +928,7 @@ class App:
         self.viz_morph = float(state.get("viz_morph", 1.0))   # preset churn
         self.menu = False         # M: slider overlay for all of the above
         self.menu_sel = 0
+        self.rich_search = int(state.get("rich_search", 1))
         self.full = False
         self.viz_max = False      # F: visualizer owns the whole terminal
         self.liked_now = False
@@ -920,6 +973,7 @@ class App:
                            "viz_react": self.viz_react,
                            "viz_speed": self.viz_speed,
                            "viz_morph": self.viz_morph,
+                           "rich_search": self.rich_search,
                            "theme": THEMES[self.theme_i][0]}, f)
         except Exception:
             pass
@@ -1657,6 +1711,10 @@ class App:
             out.append(crop_pad("", w))
 
         rows = h - len(out)
+        if self.tab == 0 and getattr(self, "rich_search", 0) and lst and \
+                not isinstance(lst[0], Playlist):
+            out.extend(self._render_rich_rows(lst, w, rows))
+            return out
         sel = self.sel[self.tab]
         # keep selection in viewport
         scr = self.scroll[self.tab]
@@ -1706,6 +1764,45 @@ class App:
             out.append(crop_pad(line, w))
         return out
 
+    def _render_rich_rows(self, lst, w, rows):
+        """Search results as two-row cards: a small album thumb, bold
+        title with duration, then artist · album underneath."""
+        out = []
+        n_vis = max(1, rows // 2)
+        sel = self.sel[self.tab]
+        scr = self.scroll[self.tab]
+        if sel < scr:
+            scr = sel
+        if sel >= scr + n_vis:
+            scr = sel - n_vis + 1
+        self.scroll[self.tab] = scr
+        for v in range(n_vis):
+            i = scr + v
+            if i >= len(lst):
+                out.append(crop_pad("", w))
+                out.append(crop_pad("", w))
+                continue
+            it = lst[i]
+            is_sel = (i == sel)
+            art = self.art.get(getattr(it, "thumb", ""), 5, 2)
+            a0 = art[0] if art else fg(DGREY) + "▒" * 5 + RESET
+            a1 = art[1] if art else fg(DGREY) + "▒" * 5 + RESET
+            bar = fg(RED) + "▌" + RESET if is_sel else " "
+            hl = bg(lerp(DARK, RED, 0.18)) if is_sel else ""
+            dur = it.duration or ""
+            tw = max(8, w - 9 - len(dur) - 2)
+            t1 = (hl + BOLD + fg(WHITE) + it.title[:tw] + RESET)
+            sub = it.artist + (f" · {it.album}" if it.album else "")
+            t2 = (hl + fg(GREY) + DIM + sub[:tw] + RESET)
+            l1 = bar + a0 + " " + t1
+            pad = w - visible_len(l1) - len(dur) - 2
+            l1 += hl + " " * max(pad, 1) + fg(DGREY) + dur + RESET
+            out.append(crop_pad(l1, w))
+            out.append(crop_pad(bar + a1 + " " + t2, w))
+        if rows % 2:
+            out.append(crop_pad("", w))
+        return out
+
     def _menu_items(self):
         """(label, attr, lo, hi, step, fmt) — fmt is a suffix string for
         continuous sliders or a tuple of names for discrete ones."""
@@ -1716,6 +1813,7 @@ class App:
             ("pixel quality", "drop_px",
              0, 2 if self._kitty_ok else 1, 1,
              ("chunky", "hi-def", "pixel")),
+            ("rich search", "rich_search", 0, 1, 1, ("off", "on")),
         ]
 
     def _render_menu_overlay(self, lines, w):
@@ -2055,13 +2153,13 @@ class App:
     def _render_visualizer(self, w, rows):
         # the UI ticks ~25fps while playing, but discrete styles look
         # steadier updating at ~12 — serve a cached frame in between
-        if self.viz_style != "drop":
+        if self.viz_style not in ("drop", "cover"):
             c = self._viz_cache
             if c and c[1:4] == (self.viz_style, w, rows) and \
                     time.time() - c[0] < 0.075:
                 return c[4]
         lines = self._render_visualizer_now(w, rows)
-        if self.viz_style != "drop":
+        if self.viz_style not in ("drop", "cover"):
             self._viz_cache = (time.time(), self.viz_style, w, rows, lines)
         return lines
 
@@ -2075,7 +2173,7 @@ class App:
             return self._viz_scope(w, rows, n, pad_l)
         if self.viz_style == "bands":
             return self._viz_bands(w, rows, n, pad_l)
-        if self.viz_style == "drop":
+        if self.viz_style in ("drop", "cover"):
             return self._viz_drop(w, rows, n, pad_l)
 
         if self.viz_style == "mirror":
@@ -2451,7 +2549,15 @@ class App:
         return [first] + [blank] * (rows - 1)
 
     def _drop_lut(self):
-        """64-entry palette: dark → primary → secondary → accent → white."""
+        """64-entry palette: dark → primary → secondary → accent → white.
+        In cover mode the gradient comes from the album art instead."""
+        if getattr(self, "viz_style", "") == "cover":
+            now = getattr(self, "now", None)
+            art = getattr(self, "art", None)
+            if now is not None and art is not None:
+                pal = art.palette(getattr(now, "thumb", ""))
+                if pal is not None:
+                    return pal
         if self._drop_lut_cache is None:
             import numpy as np
             # anchored dark lows so light themes (ice…) still have contrast
@@ -2490,14 +2596,33 @@ class App:
         if len(gaps) >= 4:                     # tempo locked — keep bobbing
             period = sorted(gaps)[len(gaps) // 2]
             groove = 0.5 + 0.5 * math.cos((now - last) / period * math.tau)
+        # mids and highs get their own transient detectors, so vocal
+        # swells and hi-hats hit visibly instead of everything hanging
+        # off the kick drum: mids surge the flow, hats spark the detail
+        rm, rt = raw[1], raw[2]
+        mavg = getattr(self, "_drop_mid_avg", 0.15) * 0.985 + rm * 0.015
+        tavg = getattr(self, "_drop_tre_avg", 0.12) * 0.985 + rt * 0.015
+        self._drop_mid_avg, self._drop_tre_avg = mavg, tavg
+        mlast = getattr(self, "_mid_t", 0.0)
+        if rm > mavg * 1.5 + 0.05 and now - mlast > 0.18:
+            self._mid_t = mlast = now
+            self._mid_amp = min(1.0, 0.4 + (rm - mavg) * 2.2)
+        mpul = getattr(self, "_mid_amp", 0.0) * math.exp(-(now - mlast) / 0.30)
+        tlast = getattr(self, "_tre_t", 0.0)
+        if rt > tavg * 1.55 + 0.04 and now - tlast > 0.09:
+            self._tre_t = tlast = now
+            self._tre_amp = min(1.0, 0.35 + (rt - tavg) * 2.5)
+        tpul = getattr(self, "_tre_amp", 0.0) * math.exp(-(now - tlast) / 0.15)
         eb, em, et = self._drop_e
         en = getattr(self, "_drop_energy", 0.2)
         en += ((eb + em + et) / 3 - en) * min(1.0, dt * 1.2)
         self._drop_energy = en
         react = getattr(self, "viz_react", 1.0)
+        self._mid_pulse = mpul * react
+        self._tre_pulse = tpul * react
         b = min(1.4, 0.25 * eb + (0.85 * pulse + 0.18 * groove) * react)
-        m = min(1.2, 0.50 * em + 0.30 * pulse * react)
-        tr = min(1.0, 0.45 * et + 0.20 * groove)
+        m = min(1.3, 0.45 * em + (0.25 * pulse + 0.50 * mpul) * react)
+        tr = min(1.2, 0.35 * et + (0.60 * tpul + 0.12 * groove) * react)
         return pulse * react, en, b, m, tr
 
     def _viz_drop(self, w, rows, n, pad_l):
@@ -2561,7 +2686,8 @@ class App:
         ps += (pulse - ps) * min(1.0, dt * 16.0)
         self._pulse_s = ps
         self._drop_t += dt * getattr(self, "viz_speed", 1.0) * \
-            (0.55 + 1.1 * en + 1.6 * ps)
+            (0.55 + 1.1 * en + 1.6 * ps
+             + 0.7 * getattr(self, "_mid_pulse", 0.0))
         t = self._drop_t
 
         # aspect-correct coordinates: half-block pixels are ~square, so the
@@ -2621,8 +2747,10 @@ class App:
             v = self._drop_post(self._drop_field(
                 self._drop_preset, self._drop_pa,
                 *coords(self._drop_pa), t, eb, em, et), self._drop_pa)
-        # brightness: slow mood bed + a lift on the kick — no strobing
-        bright = min(1.0, 0.30 + 0.50 * min(1.0, en * 1.5) + 0.30 * ps)
+        # brightness: slow mood bed + a lift on the kick, plus a quick
+        # sparkle when the hats tick — alive in the highs, no strobing
+        bright = min(1.05, 0.30 + 0.50 * min(1.0, en * 1.5) + 0.26 * ps
+                     + 0.14 * getattr(self, "_tre_pulse", 0.0))
         idxf = np.clip(v * 63, 0, 63)          # palette space, float
         # ~70ms ease on the field: values glide between frames instead
         # of snapping, which is most of what reads as "choppy". applied
@@ -2802,7 +2930,7 @@ class App:
                 # real ceiling); other styles tick the UI at ~25 (smooth
                 # progress bar) with the visualizer itself cached down to
                 # ~12; idle screen is lazier
-                if self.viz_style == "drop" and (self.now or self.viz_max):
+                if self.viz_style in ("drop", "cover") and (self.now or self.viz_max):
                     tick = 0.008
                 elif self.now or self.input_mode or self.viz_max:
                     tick = 0.04
@@ -2982,10 +3110,62 @@ def doctor():
     return ok
 
 
+def setup_wizard():
+    """ytm setup — the whole rig in one pass: dependency check, sign-in,
+    then the taste questions (theme, visualizer, search style)."""
+    print(BOLD + "ytm setup" + RESET + "\n")
+    print("dependencies:")
+    if not doctor():
+        print("\n  fix the ✗ lines first (on Arch: "
+              "sudo pacman -S mpv yt-dlp ffmpeg), then rerun ytm setup.")
+        return False
+    print()
+    if os.path.isfile(AUTH_FILE) and verify_auth():
+        print("✓ already signed in")
+        if input("  sign in again anyway? [y/N] ").strip().lower() == "y":
+            login_wizard()
+    elif input("sign in to your account now? [Y/n] "
+               ).strip().lower() != "n":
+        login_wizard()
+    state = {}
+    try:
+        with open(STATE_FILE) as f:
+            state = json.load(f)
+    except Exception:
+        pass
+    names = [t[0] for t in THEMES]
+    print("\nthemes: " + " · ".join(
+        f"{i + 1}={n}" for i, n in enumerate(names)))
+    pick = input(f"pick a theme [1-{len(names)}, enter keeps "
+                 f"'{state.get('theme', names[0])}']: ").strip()
+    if pick.isdigit() and 1 <= int(pick) <= len(names):
+        state["theme"] = names[int(pick) - 1]
+    state["viz"] = ("cover" if input(
+        "visualizer palette — theme colors [Y] or album-art colors [c]? "
+    ).strip().lower() == "c" else "drop")
+    kitty = App._kitty_sniff()
+    state["drop_px"] = 2 if kitty else 1
+    print("  pixel quality auto-set: " +
+          ("pixel — true bitmaps, your terminal speaks kitty graphics"
+           if kitty else "hi-def quadrants"))
+    state["rich_search"] = 0 if input(
+        "rich search results with thumbnails? [Y/n] "
+    ).strip().lower() == "n" else 1
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+    print("\n✓ all set — run: " + BOLD + "ytm" + RESET)
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(prog="ytm", description=__doc__)
-    ap.add_argument("--login", "--setup", action="store_true", dest="login",
+    ap.add_argument("cmd", nargs="?", choices=["setup"],
+                    help="ytm setup — guided first-run setup")
+    ap.add_argument("--login", action="store_true",
                     help="interactive sign-in wizard (pick your browser)")
+    ap.add_argument("--setup", action="store_true",
+                    help="same as: ytm setup")
     ap.add_argument("--auth", action="store_true",
                     help="sign in by pasting browser request headers")
     ap.add_argument("--auth-firefox", action="store_true",
@@ -3008,6 +3188,8 @@ def main():
     ap.add_argument("--ao", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
 
+    if args.cmd == "setup" or args.setup:
+        sys.exit(0 if setup_wizard() else 1)
     if args.doctor:
         sys.exit(0 if doctor() else 1)
     if args.eww:

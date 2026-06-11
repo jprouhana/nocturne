@@ -11,8 +11,9 @@ Album art gets rendered as truecolor half-blocks, search results start a radio
 so the music keeps going, and your library/playlists/likes work once you're
 signed in. Works fine without an account too, you just lose the library stuff.
 
-The `drop` visualizer is a milkdrop-style plasma — twenty field equations that
-morph and crossfade to the beat, driven by the real audio spectrum:
+The `drop` visualizer is a milkdrop-style plasma — thirty-six field equations
+that morph and crossfade to the beat, driven by the real audio spectrum. Its
+sibling `cover` is the same engine painted with the current album's colors:
 
 ![drop visualizer](assets/visualizer.gif)
 
@@ -33,7 +34,8 @@ cd ytm-tui
 ```
 
 That sets up a venv, drops a `ytm` launcher into `~/.local/bin`, and offers
-to sign you in.
+to sign you in. Then `ytm setup` walks the rest — dependency check, account,
+theme, visualizer flavor, search style — in one pass.
 
 **On Windows?** It runs through WSL — there's a gentle, no-experience
 walkthrough at [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md).
@@ -80,6 +82,8 @@ guest mode.
 
 ## notes
 
+- search results show album thumbnails and a second info line (toggle
+  "rich search" in the `M` menu if you prefer dense single-line results).
 - the spectrum is 45 Hz to 11 kHz, log-spaced, with auto gain. bars have
   gravity and peak caps like cava. if there's no pulse/pipewire monitor to
   grab it falls back to a decorative wave.
@@ -97,7 +101,9 @@ guest mode.
   to whatever your machine sustains.
 - the plasma is beat-locked: it tracks bass kicks and the song's tempo,
   so the field punches in on the beat and bobs with the groove instead of
-  flickering at every spectrum wiggle. `[` `]` tune how hard the beat
+  flickering at every spectrum wiggle. mids and highs have their own
+  transient detectors — vocal swells surge the flow, hi-hats spark the
+  fine detail and brightness. `[` `]` tune how hard the beat
   hits, `{` `}` tune the base flow speed — or just press `M` for a
   slider menu (beat punch, flow speed, morph speed, pixel quality) that
   floats over the running visualizer. everything sticks across restarts.
