@@ -584,6 +584,43 @@ class ArtCache:
                          daemon=True).start()
         return None
 
+    def rgb(self, url):
+        """Square 512px RGB array of the artwork (uint8), for pasting
+        straight into pixel-mode bitmaps. None while loading."""
+        if not url:
+            return None
+        with self._lock:
+            if url in getattr(self, "_rgb", {}):
+                return self._rgb[url]
+            if not hasattr(self, "_rgb"):
+                self._rgb = {}
+            rkey = ("rgb", url)
+            if rkey in self._fetching:
+                return None
+            self._fetching.add(rkey)
+        threading.Thread(target=self._fetch_rgb, args=(url,),
+                         daemon=True).start()
+        return None
+
+    def _fetch_rgb(self, url):
+        try:
+            from PIL import Image
+            import io
+            import numpy as np
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            raw = urllib.request.urlopen(req, timeout=10).read()
+            img = Image.open(io.BytesIO(raw)).convert("RGB")
+            side = min(img.size)
+            left = (img.width - side) // 2
+            top = (img.height - side) // 2
+            img = img.crop((left, top, left + side, top + side))
+            img = img.resize((512, 512), Image.LANCZOS)
+            with self._lock:
+                self._rgb[url] = np.asarray(img, dtype=np.uint8)
+        except Exception:
+            with self._lock:
+                self._fetching.discard(("rgb", url))
+
     def _fetch_pal(self, url):
         try:
             from PIL import Image
@@ -2225,11 +2262,14 @@ class App:
     def _render_visualizer(self, w, rows):
         # every style renders fresh every tick now — the bar physics are
         # time-based, so high fps just means smoother, not twitchier
+        self._kitty_payload = None
         lines = self._render_visualizer_now(w, rows)
         if (getattr(self, "viz_art", 0)
                 and self.viz_style in ("drop", "cover")
                 and self.now and getattr(self.now, "thumb", "")
-                and rows >= 8):
+                and rows >= 8 and not self._kitty_payload):
+            # pixel mode bakes the art into the bitmap itself; the text
+            # overlay is for the block-character modes
             lines = self._overlay_art(lines, w, rows)
         return lines
 
@@ -2659,6 +2699,17 @@ class App:
         import numpy as np
         lut = np.clip(self._drop_lut() * bright, 0, 255).astype(np.uint8)
         rgb = lut[idxf.astype(np.intp)]              # (Hpx, Wpx, 3)
+        if getattr(self, "viz_art", 0) and getattr(self, "now", None):
+            # art overlay in pixel mode: bake the cover into the bitmap
+            # at true resolution — half-block glyphs over a kitty image
+            # lose their background halves to the z-order
+            a = self.art.rgb(getattr(self.now, "thumb", ""))
+            if a is not None:
+                side = max(8, int(min(Wpx, Hpx) * 0.62))
+                ai = np.linspace(0, 511, side).astype(int)
+                y0 = (Hpx - side) // 2
+                x0 = (Wpx - side) // 2
+                rgb[y0:y0 + side, x0:x0 + side] = a[ai][:, ai]
         data = base64.standard_b64encode(
             zlib.compress(rgb.tobytes(), 1)).decode("ascii")
         new = 91 + (self._kitty_id ^ 1)              # double-buffer ids
@@ -3290,9 +3341,15 @@ def setup_wizard():
     except Exception:
         pass
     names = [t[0] for t in THEMES]
-    print("\nthemes: " + " · ".join(
-        f"{i + 1}={n}" for i, n in enumerate(names)))
-    pick = input(f"pick a theme [1-{len(names)}, enter keeps "
+    print()
+    for i, (name, p, s, a) in enumerate(THEMES):
+        sw = []
+        for x in range(26):
+            f = x / 25
+            c = lerp(p, s, f * 2) if f < 0.5 else lerp(s, a, (f - 0.5) * 2)
+            sw.append(fg(c) + "█")
+        print(f"  {BOLD}{i + 1}{RESET}  {name:<10s} " + "".join(sw) + RESET)
+    pick = input(f"\npick a theme [1-{len(names)}, enter keeps "
                  f"'{state.get('theme', names[0])}']: ").strip()
     if pick.isdigit() and 1 <= int(pick) <= len(names):
         state["theme"] = names[int(pick) - 1]
