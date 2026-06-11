@@ -2301,7 +2301,7 @@ class App:
                  + f"{sign:^{bw - 2}}" + RESET + bord + "║" + RESET,
                  bord + "╚" + "═" * (bw - 2) + "╝" + RESET]
         x0 = (w - bw) // 2
-        y0 = max(0, (len(lines) - len(rows)) // 2)
+        y0 = max(4, (len(lines) - len(rows)) // 2)
         for i, rrow in enumerate(rows):
             if y0 + i >= len(lines):
                 break
@@ -2310,6 +2310,43 @@ class App:
                 if ch:
                     put_cell(cells, x0 + j, sgr, ch)
             lines[y0 + i] = cells_to_str(cells)
+        # the box is on fire — tongues lick up off the top border with
+        # the heart splash's multi-sine flicker, transparent around the
+        # flames so the screen keeps living behind them
+        tt = time.time()
+        col_f, col_n2, col_n3 = [], [], []
+        for j in range(bw):
+            # low spatial frequency: tongues span several cells instead
+            # of strobing per column (cell res is much coarser than the
+            # splash's half-block pixels)
+            n1 = 0.5 + 0.5 * math.sin(j * 0.73 - tt * 9)
+            n2 = 0.5 + 0.5 * math.sin(j * 0.31 + tt * 5.7)
+            n3 = 0.5 + 0.5 * math.sin(j * 1.7 + tt * 15)
+            col_f.append(n1 * n2 * 0.7 + n3 * 0.3)
+            col_n2.append(n2)
+            col_n3.append(n3)
+        for dy in range(1, 5):
+            y = y0 - dy
+            if y < 0:
+                continue
+            cells = ansi_cells(lines[y], w)
+            lit = False
+            for j in range(bw):
+                fh = 1 + int(col_f[j] * 3.2)       # 1..4 — an unbroken crown
+                if dy < fh:
+                    c = lerp(ORANGE, RED, dy / 4)
+                    put_cell(cells, x0 + j, fg(c), "█" if dy == 1 else "▓")
+                    lit = True
+                elif dy == fh:
+                    c = lerp(lerp(ORANGE, RED, dy / 4), PINK, 0.45)
+                    tip = "▂▃▄▅"[int(col_n2[j] * 3.99)]
+                    put_cell(cells, x0 + j, fg(c), tip)
+                    lit = True
+                elif dy == fh + 1 and col_n3[j] > 0.93:
+                    put_cell(cells, x0 + j, fg(PINK), "✦")  # a spark
+                    lit = True
+            if lit:
+                lines[y] = cells_to_str(cells)
         return lines
 
     def _render_viz_max(self, w, h):
@@ -3679,8 +3716,8 @@ class App:
                 if self.now or self.viz_max:
                     tick = (0.008 if self.viz_style in ("drop", "cover")
                             else 0.016)
-                elif self.input_mode:
-                    tick = 0.04
+                elif self.input_mode or self.help:
+                    tick = 0.04   # the help box's flames keep dancing
                 else:
                     tick = 0.12
                 # a heart splash is alive: full frame rate no matter what
