@@ -1718,10 +1718,18 @@ class Blackspace:
 
     def _ensure_lut(self):
         # 64 entries, post curve (contrast → gamma → cosine S) baked in,
-        # built from the live theme so matrix gets a green dungeon
+        # built from the live theme so matrix gets a green dungeon.
+        # the dark anchor sits at luminance ≈ 0.175 — ABOVE the 0.15
+        # cutoff that luminance-keyed terminal shaders (scifi-space.glsl)
+        # use to decide what counts as "background". anchor it lower and
+        # the walls dissolve into the shader's starfield. lerp is
+        # luminance-linear and every theme primary clears 0.15, so the
+        # whole ramp stays solid; the ceiling alone ducks UNDER the
+        # cutoff on purpose (see frame()) — the dungeon floats in space.
         if self.lut is not None:
             return
-        stops = [(8, 8, 14), lerp((8, 8, 14), RED, 0.45), RED,
+        dark = (40, 44, 62)
+        stops = [dark, lerp(dark, RED, 0.45), RED,
                  ORANGE, PINK, lerp(PINK, WHITE, 0.55)]
         pos = [0.0, 0.34, 0.60, 0.80, 0.94, 1.0]
         lut = []
@@ -1863,6 +1871,11 @@ class Blackspace:
                       - self.recoil * 3)
         horizon = min(H - 10, max(8, horizon))
         bright = 1.0 + 0.30 * self.pulse_s + 0.14 * tre
+
+        # ceiling: true void, deliberately BELOW the luminance cutoff —
+        # on a shader-backed terminal the sky becomes its starfield, on
+        # anything else it reads near-black. either way: blackspace.
+        idx[:horizon + 1] = ex((8, 8, 14))
 
         # floor: twin orbiting ripple sources, fog scales the LUT index
         # so far light dies through ember into black
@@ -3198,16 +3211,20 @@ class App:
                 line = (f" {fg(ORANGE)}{pic}{RESET}{fg(WHITE)}{it.title}"
                         f"{RESET} {fg(GREY)}{DIM}{it.count}{RESET}")
             else:
-                playing = (self.now and self.tab == 3 and i == self.qpos)
-                if self.tab == 3:
-                    # the queue speaks Undertale: the playing track is a
-                    # beating soul, history is hollow and faded, what's
-                    # coming waits as dim hearts down the path
+                playing = bool(self.now) and (
+                    (self.tab == 3 and i == self.qpos)
+                    or (self.tab == 1
+                        and it.video_id == self.now.video_id))
+                if self.tab in (1, 3):
+                    # the queue AND the library speak Undertale: the
+                    # playing track is a beating soul, queue history is
+                    # hollow and faded, everything else waits as dim
+                    # hearts — a liked song IS a heart, after all
                     if playing:
                         hc = lerp(RED, PINK,
                                   0.5 + 0.5 * math.sin(time.time() * 6))
                         mark = fg(hc) + "♥ " + RESET
-                    elif i < self.qpos:
+                    elif self.tab == 3 and i < self.qpos:
                         mark = fg(DGREY) + "♡ " + RESET
                     else:
                         mark = fg(lerp(DARK, RED, 0.55)) + "♡ " + RESET
@@ -3215,18 +3232,20 @@ class App:
                     mark = fg(RED) + "▶ " + RESET if playing else "  "
                 faded = self.tab == 3 and i < self.qpos and not playing
                 tcol = DGREY if faded else WHITE
-                cloud = (fg(ORANGE) + "☁ " + RESET
-                         if it.source == "sc" else "")
+                src = ""
+                if self.tab in (0, 1, 3):    # the mixed-source views
+                    src = ((fg(ORANGE) + "☁ " if it.source == "sc"
+                            else fg(RED) + "♪ ") + RESET)
                 dur = it.duration or ""
-                tw = w - 4 - len(dur) - 2 - (2 if cloud else 0)
+                tw = w - 4 - len(dur) - 2 - (2 if src else 0)
                 t = it.title[:max(tw - len(it.artist) - 3, 8)]
-                line = (f" {mark}{cloud}{fg(tcol)}{t}{RESET} "
+                line = (f" {mark}{src}{fg(tcol)}{t}{RESET} "
                         f"{fg(GREY)}{DIM}{it.artist}{RESET}")
                 pad = w - visible_len(line) - len(dur) - 2
                 line += " " * max(pad, 1) + fg(DGREY) + dur + RESET
             if is_sel:
                 plain = ANSI_RE.sub("", line)
-                if self.tab == 3 and not isinstance(it, Playlist):
+                if self.tab in (1, 3) and not isinstance(it, Playlist):
                     # the selection cursor IS the soul, like the menus
                     hc = lerp(RED, PINK,
                               0.5 + 0.5 * math.sin(time.time() * 6))
@@ -3266,9 +3285,9 @@ class App:
             bar = fg(RED) + "▌" + RESET if is_sel else " "
             hl = bg(lerp(DARK, RED, 0.18)) if is_sel else ""
             dur = it.duration or ""
-            cloud = (fg(ORANGE) + "☁ " + RESET
-                     if getattr(it, "source", "yt") == "sc" else "")
-            tw = max(8, w - 9 - len(dur) - 2 - (2 if cloud else 0))
+            cloud = ((fg(ORANGE) + "☁ " if getattr(it, "source", "yt") == "sc"
+                      else fg(RED) + "♪ ") + RESET)
+            tw = max(8, w - 9 - len(dur) - 2 - 2)
             t1 = (cloud + hl + BOLD + fg(WHITE) + it.title[:tw] + RESET)
             sub = it.artist + (f" · {it.album}" if it.album else "")
             t2 = (hl + fg(GREY) + DIM + sub[:tw] + RESET)
