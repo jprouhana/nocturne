@@ -8,6 +8,7 @@ Usage:
   ytm                 launch the TUI
   ytm setup           guided setup: deps, sign-in, theme, visualizer
   ytm update          pull the latest version + refresh yt-dlp
+  ytm uninstall       remove the launcher, install and (optionally) config
   ytm --auth          sign in by pasting request headers from music.youtube.com
   ytm --oauth         sign in with a YouTube-scoped OAuth token (no cookies)
   ytm --login         interactive sign-in wizard (pick your browser)
@@ -3613,6 +3614,51 @@ def self_update():
     return True
 
 
+def uninstall():
+    """ytm uninstall — remove the launcher, this checkout, and (if you
+    say so) your sign-in and settings."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    launcher = os.path.join(os.path.expanduser("~"), ".local", "bin", "ytm")
+    # only ever delete something that actually looks like a ytm checkout
+    sane = (os.path.isfile(os.path.join(here, "ytm.py"))
+            and (os.path.isdir(os.path.join(here, ".git"))
+                 or os.path.isfile(os.path.join(here, "install.sh")))
+            and here not in ("/", os.path.expanduser("~")))
+    print("this removes:")
+    if sane:
+        print(f"  • the install: {here}")
+    print(f"  • the launcher: {launcher}")
+    print(f"  • NOT your config/sign-in ({CONFIG_DIR}) unless you say so")
+    try:
+        if input("\nremove ytm? [y/N] ").strip().lower() != "y":
+            print("kept everything.")
+            return True
+        wipe_cfg = input(
+            f"also delete config + sign-in ({CONFIG_DIR})? [y/N] "
+        ).strip().lower() == "y"
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if os.path.isfile(launcher):
+        try:
+            with open(launcher) as f:
+                if "ytm" in f.read():
+                    os.unlink(launcher)
+                    print(f"✓ removed {launcher}")
+        except OSError as e:
+            print(f"✗ launcher: {e}")
+    if wipe_cfg and os.path.isdir(CONFIG_DIR):
+        shutil.rmtree(CONFIG_DIR, ignore_errors=True)
+        print(f"✓ removed {CONFIG_DIR} (sign-in included)")
+    elif os.path.isdir(CONFIG_DIR):
+        print(f"○ kept {CONFIG_DIR} — sign-in survives a reinstall")
+    if sane:
+        shutil.rmtree(here, ignore_errors=True)
+        print(f"✓ removed {here}")
+    print("gone. thanks for listening ♪")
+    return True
+
+
 def setup_wizard():
     """ytm setup — the whole rig in one pass: dependency check, sign-in,
     then the taste questions (theme, visualizer, search style)."""
@@ -3675,9 +3721,11 @@ def setup_wizard():
 
 def main():
     ap = argparse.ArgumentParser(prog="ytm", description=__doc__)
-    ap.add_argument("cmd", nargs="?", choices=["setup", "update"],
+    ap.add_argument("cmd", nargs="?",
+                    choices=["setup", "update", "uninstall"],
                     help="ytm setup — guided first-run setup; "
-                         "ytm update — pull the latest version")
+                         "ytm update — pull the latest version; "
+                         "ytm uninstall — remove ytm cleanly")
     ap.add_argument("--login", action="store_true",
                     help="interactive sign-in wizard (pick your browser)")
     ap.add_argument("--setup", action="store_true",
@@ -3711,6 +3759,8 @@ def main():
         sys.exit(0 if setup_wizard() else 1)
     if args.cmd == "update":
         sys.exit(0 if self_update() else 1)
+    if args.cmd == "uninstall":
+        sys.exit(0 if uninstall() else 1)
     if args.doctor:
         sys.exit(0 if doctor() else 1)
     if args.eww:

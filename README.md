@@ -81,7 +81,8 @@ pixel renderer will use.
 
 `ytm update` pulls the latest version and refreshes yt-dlp; the app also
 checks GitHub once per launch and shows an ↑ badge when there's something
-new.
+new. `ytm uninstall` removes it as cleanly as it arrived (your sign-in is
+kept unless you say otherwise).
 
 ## keys
 
