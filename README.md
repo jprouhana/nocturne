@@ -83,7 +83,7 @@ guest mode.
 - the spectrum is 45 Hz to 11 kHz, log-spaced, with auto gain. bars have
   gravity and peak caps like cava. if there's no pulse/pipewire monitor to
   grab it falls back to a decorative wave.
-- the `drop` visualizer cycles through 28 field equations milkdrop-style
+- the `drop` visualizer cycles through 36 field equations milkdrop-style
   (radial, lattice, honeycomb, fractal — many roll an off-center origin),
   crossfading every 12–24s or early when the bass hits hard. `p` cycles
   pixel quality: chunky half-blocks, hi-def quadrants, or — in kitty,

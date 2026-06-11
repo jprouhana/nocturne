@@ -2165,7 +2165,7 @@ class App:
             return 0.5 - 0.5 * np.cos(v * math.tau * P["band"])
         return 0.5 - 0.5 * np.cos(v * math.pi)
 
-    N_PRESETS = 28
+    N_PRESETS = 36
 
     def _drop_field(self, preset, P, xs, ys, r, ang, t, eb, em, et):
         """One milkdrop-ish interference field. Each preset is a different
@@ -2342,12 +2342,66 @@ class App:
                     + sin(d * 3.5 + t * 0.5)
                     + em * sin((xs + ys) * 2.5 - t)
                     + et * sin(d * 14 - t * 3))
-        # 27: dunes — warped ridges rolling across the panel
-        wx = xs + 1.1 * sin(ys * 1.3 + t * 0.5)
-        return (sin(wx * (k1 * 0.8 + 2 * eb) + ys * 1.5 - t * 0.9)
-                + sin(ys * k2 * 0.5 + sin(wx * 1.7 - t * 0.4) * 2)
-                + em * sin((wx + ys) * 3 + t * 0.7)
-                + et * 0.9 * sin(wx * 9 - t * 2.5))
+        if preset == 27:   # dunes — warped ridges rolling across the panel
+            wx = xs + 1.1 * sin(ys * 1.3 + t * 0.5)
+            return (sin(wx * (k1 * 0.8 + 2 * eb) + ys * 1.5 - t * 0.9)
+                    + sin(ys * k2 * 0.5 + sin(wx * 1.7 - t * 0.4) * 2)
+                    + em * sin((wx + ys) * 3 + t * 0.7)
+                    + et * 0.9 * sin(wx * 9 - t * 2.5))
+        if preset == 28:   # rotor lattice — a grid seen through a slow spin
+            co, si = math.cos(t * 0.18 + ph), math.sin(t * 0.18)
+            xr = xs * co - ys * si
+            yr = xs * si + ys * co
+            return (sin(xr * (k1 * 1.6 + 2 * eb) + t * 0.4)
+                    + sin(yr * k2 * 0.9 - t * 0.6)
+                    + eb * 2 * sin(r * (5 + 5 * eb) - t * 2)
+                    + et * sin((xr + yr) * 7 - t * 3))
+        if preset == 29:   # ripple pond — three drifting raindrops
+            acc = 0.0
+            for i in range(3):
+                px = 1.2 * math.sin(t * (0.21 + 0.09 * i) + ph + i * 2.1)
+                py = 0.7 * math.cos(t * (0.17 + 0.07 * i) + i * 1.3)
+                di = np.sqrt((xs - px) ** 2 + (ys - py) ** 2)
+                acc = acc + sin(di * (k1 * 2 + 5 * eb) - t * (1.6 + 0.3 * i))
+            return acc + em * sin(r * 3 - t) + et * sin(r * 14 - t * 4)
+        if preset == 30:   # chevron flow — zigzag wavefronts marching
+            z1 = np.abs(((xs * k1 * 0.8 + ys * 0.6 + t * 0.5) % 2) - 1)
+            z2 = np.abs(((ys * k2 * 0.5 - xs * 0.4 - t * 0.35) % 2) - 1)
+            return ((z1 * 2 - 1) * (1.2 + 1.5 * eb)
+                    + (z2 * 2 - 1) * 1.2
+                    + em * sin((xs + ys) * 3 + t)
+                    + et * sin(xs * 9 - t * 3))
+        if preset == 31:   # ribbons — horizontal silk bands breathing
+            wv = sin(xs * 2.2 + t * 0.8) * (1.8 + 2.2 * eb)
+            return (sin(ys * k1 * 1.5 + wv)
+                    + sin(ys * k2 * 0.7 - wv * 0.6 + t * 0.5)
+                    + em * sin(xs * 3 - t * 0.7)
+                    + et * sin(ys * 11 + t * 2.5))
+        if preset == 32:   # counterspiral moiré — arms braiding past each other
+            s1 = ang * A + r * (k1 * 2.5 + 4 * eb) - t * 1.6
+            s2 = ang * A - r * (k2 * 1.5) + t * 1.1
+            return (sin(s1) + sin(s2)
+                    + em * sin(r * 4 - t)
+                    + et * 1.2 * sin(r * 13 + ang * 2 - t * 4))
+        if preset == 33:   # speed lines — radial fan rushing outward
+            return (sin(ang * (A * 3)) * (1.0 + 1.2 * em)
+                    + sin(r * (6 + 8 * eb) - t * (3 + 2 * em)) * 1.4
+                    + sin(np.log(r + 0.3) * 4 - t * 2) * 0.8
+                    + et * sin(r * 18 - t * 6))
+        if preset == 34:   # spinning box tunnel — nested squares in a twist
+            co, si = math.cos(t * 0.25), math.sin(t * 0.25)
+            xr = xs * co - ys * si
+            yr = xs * si + ys * co
+            q = np.maximum(np.abs(xr), np.abs(yr))
+            return (sin(q * (k1 * 2.5 + 7 * eb) - t * 2)
+                    + sin(q * 3 + t * 0.6)
+                    + em * sin(ang * A + t)
+                    + et * sin(q * 15 - t * 5))
+        # 35: aurora — curtains of light rippling sideways
+        cur = sin(xs * k1 * 1.1 + sin(ys * 1.6 + t * 0.6) * (2.2 + 2 * eb))
+        return (cur * (1.5 + eb) + sin(ys * 1.8 - t * 0.4)
+                + em * sin(xs * 5 + t * 1.2)
+                + et * 0.9 * sin((xs - ys) * 8 + t * 2.8))
 
     @staticmethod
     def _kitty_sniff():
