@@ -2330,7 +2330,10 @@ class App:
         W = w if getattr(self, "eww_flush", False) else max(w - 4, 20)
         H = rows * 2
         mode = getattr(self, "drop_px", 0)
-        ss = 2 if mode == 2 else 1           # silk: 4× supersampled field
+        # silk is 4× supersampled; chunky gets the same treatment because
+        # its grid is so coarse that radial cores alias into staircases —
+        # averaging 4 subsamples per pixel costs nothing at that size
+        ss = 1 if mode == 1 else 2
         Wpx = (W * 2 if mode else W) * ss    # hi-def: 2×2 px per cell
         Hpx = H * ss
         pad = (w - W) // 2
@@ -2414,15 +2417,30 @@ class App:
         idxf = np.clip(v * 63, 0, 63)          # palette space, float
         if (fw, fh) != (Wpx, Hpx):
             # maximized panels: the field was computed under a sample
-            # budget — stretch it back up (nearest is invisible at cell
-            # size and keeps the frame inside the tick)
-            yi = np.linspace(0, fh - 1, Hpx).astype(int)
-            xi = np.linspace(0, fw - 1, Wpx).astype(int)
-            idxf = idxf[yi][:, xi]
+            # budget — stretch it back up bilinearly, so dense regions
+            # (a swirl core) ramp smoothly instead of snapping in blocks
+            yf = np.linspace(0, fh - 1, Hpx)
+            xf = np.linspace(0, fw - 1, Wpx)
+            y0 = yf.astype(int)
+            x0 = xf.astype(int)
+            y1 = np.minimum(y0 + 1, fh - 1)
+            x1 = np.minimum(x0 + 1, fw - 1)
+            wy = (yf - y0)[:, None]
+            wx = (xf - x0)[None, :]
+            top = idxf[y0][:, x0] * (1 - wx) + idxf[y0][:, x1] * wx
+            bot = idxf[y1][:, x0] * (1 - wx) + idxf[y1][:, x1] * wx
+            idxf = top * (1 - wy) + bot * wy
         if ss > 1:
-            # silk: average the oversampled field down — banding edges
-            # melt into gradients instead of stair-stepping
+            # average the oversampled field down — banding edges melt
+            # into gradients instead of stair-stepping
             idxf = idxf.reshape(H, ss, Wpx // ss, ss).mean(axis=(1, 3))
+        # ~70ms ease on the displayed values: cells glide between frames
+        # instead of snapping, which is most of what reads as "choppy".
+        # brightness rides the palette, so the kick still lands instantly
+        prev = getattr(self, "_drop_idxp", None)
+        if prev is not None and prev.shape == idxf.shape:
+            idxf = prev + (idxf - prev) * min(1.0, dt * 14.0)
+        self._drop_idxp = idxf
 
         # 64 palette escape strings per frame — cells become table lookups
         # instead of formatting six ints each (this is the fps)

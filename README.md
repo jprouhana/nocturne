@@ -88,7 +88,8 @@ guest mode.
   crossfading every 12–24s or early when the bass hits hard. `p` cycles
   pixel quality: chunky half-blocks, hi-def quadrants, or silk — the field
   rendered 4× oversampled and averaged down, for smooth gradients if you
-  don't mind the extra CPU.
+  don't mind the extra CPU. everything is anti-aliased and eased between
+  frames, so dense spots (a swirl core) stay smooth instead of strobing.
 - the plasma is beat-locked: it tracks bass kicks and the song's tempo,
   so the field punches in on the beat and bobs with the groove instead of
   flickering at every spectrum wiggle. `[` `]` tune how hard the beat
