@@ -73,7 +73,8 @@ guest mode.
 | `s` | shuffle queue | `r` | repeat |
 | `v` | cycle visualizer | `c` | cycle color theme |
 | `w` | work mode (no art) | `f` | fullscreen |
-| `p` | hi-def plasma pixels | | |
+| `p` | hi-def plasma pixels | `F` | maximize the visualizer |
+| `[` / `]` | beat punch −/+ | `{` / `}` | flow speed −/+ |
 | `1`-`4` / `tab` | switch view | `esc` / `h` | back out of playlist |
 | `q` | quit | | |
 
@@ -82,9 +83,14 @@ guest mode.
 - the spectrum is 45 Hz to 11 kHz, log-spaced, with auto gain. bars have
   gravity and peak caps like cava. if there's no pulse/pipewire monitor to
   grab it falls back to a decorative wave.
-- the `drop` visualizer cycles through 20 field equations milkdrop-style,
+- the `drop` visualizer cycles through 24 field equations milkdrop-style,
   crossfading every 12–24s or early when the bass hits hard. `p` switches
   it from half-block pixels to quadrant rendering (double resolution).
+- the plasma is beat-locked: it tracks bass kicks and the song's tempo,
+  so the field punches in on the beat and bobs with the groove instead of
+  flickering at every spectrum wiggle. `[` `]` tune how hard the beat
+  hits, `{` `}` tune the base flow speed — both stick across restarts.
+  `F` hands the whole terminal to the visualizer.
 - you can embed the visualizer in an [eww](https://github.com/elkowar/eww)
   widget — see [docs/EWW-WIDGET.md](docs/EWW-WIDGET.md).
 - if playback suddenly breaks it's basically always yt-dlp being out of

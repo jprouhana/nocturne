@@ -378,19 +378,24 @@ class SpectrumTap:
             return
         threading.Thread(target=self._run, daemon=True).start()
 
+    @staticmethod
+    def _default_sink():
+        try:
+            return subprocess.run(
+                ["pactl", "get-default-sink"], capture_output=True,
+                text=True, timeout=3).stdout.strip()
+        except Exception:
+            return ""
+
     def _build_cmd(self):
         if self._source_cmd:
             return self._source_cmd
         if not shutil.which("parec"):
             return None
-        try:
-            sink = subprocess.run(
-                ["pactl", "get-default-sink"], capture_output=True,
-                text=True, timeout=3).stdout.strip()
-        except Exception:
-            sink = ""
+        sink = self._default_sink()
         if not sink:
             return None
+        self._sink = sink
         return ["parec", "--raw", "--format=float32le",
                 f"--rate={self.RATE}", "--channels=1",
                 "--latency-msec=30", "-d", f"{sink}.monitor"]
@@ -410,6 +415,8 @@ class SpectrumTap:
                 return
             self.alive = True
             buf = b""
+            check_t = time.time()
+            switched = False
             while not self._stop:
                 data = self._proc.stdout.read(nbytes - len(buf))
                 if not data:
@@ -425,11 +432,25 @@ class SpectrumTap:
                 with self._lock:
                     self._spectrum = spec
                     self._samples = samples
+                # follow the default sink: plugging in headphones moves it,
+                # but parec stays pinned to the old monitor — re-pin
+                if (not self._source_cmd and getattr(self, "_sink", "")
+                        and time.time() - check_t > 2.0):
+                    check_t = time.time()
+                    now = self._default_sink()
+                    if now and now != self._sink:
+                        switched = True
+                        try:
+                            self._proc.kill()
+                        except OSError:
+                            pass
+                        break
             self.alive = False
             self._proc = None
             if self._stop:
                 return
-            time.sleep(3)  # sink vanished (e.g. BT drop) — retry, re-resolve
+            if not switched:
+                time.sleep(3)  # sink vanished (e.g. BT drop) — retry
 
     def levels(self, n):
         import numpy as np
@@ -830,7 +851,14 @@ class App:
         self.drop_hd = state.get("drop_hd", False)
         self._drop_last_switch = 0.0
         self._drop_bass_avg = 0.15
+        self._beat_t = 0.0        # beat tracker: last kick + recent gaps
+        self._beat_amp = 0.0
+        self._beat_gaps = []
+        self._drop_energy = 0.2   # slow mood bed, immune to frame jitter
+        self.viz_react = float(state.get("viz_react", 1.0))   # [ ]
+        self.viz_speed = float(state.get("viz_speed", 1.0))   # { }
         self.full = False
+        self.viz_max = False      # F: visualizer owns the whole terminal
         self.liked_now = False
         self.input_mode = False
         self.input_buf = ""
@@ -870,6 +898,8 @@ class App:
                            "repeat": self.repeat, "work": self.work,
                            "viz": self.viz_style,
                            "drop_hd": self.drop_hd,
+                           "viz_react": self.viz_react,
+                           "viz_speed": self.viz_speed,
                            "theme": THEMES[self.theme_i][0]}, f)
         except Exception:
             pass
@@ -1179,6 +1209,7 @@ class App:
             self.say("loading playlists — press A again in a second")
             return
         self.full = False
+        self.viz_max = False
         self.picker = self.playlists
         self.picker_sel = 0
         self.picker_track = lst[i]
@@ -1338,6 +1369,7 @@ class App:
             self.running = False
         elif k == "/":
             self.full = False          # can't see the search box otherwise
+            self.viz_max = False
             self.input_mode = True
             self.input_purpose = "search"
             self.input_buf = ""
@@ -1346,6 +1378,7 @@ class App:
                 self.say("playlists need sign-in → ytm --login")
             else:
                 self.full = False
+                self.viz_max = False
                 self.input_mode = True
                 self.input_purpose = "newpl"
                 self.input_buf = ""
@@ -1401,10 +1434,25 @@ class App:
             self.say(f"theme: {THEMES[self.theme_i][0]}")
         elif k == "f":
             self.full = not self.full
+            self.viz_max = False
+        elif k == "F":
+            self.viz_max = not self.viz_max
+            if self.viz_max:
+                self.say("visualizer maximized — F or esc brings it back")
+        elif k == "ESC" and self.viz_max:
+            self.viz_max = False
         elif k == "p":
             self.drop_hd = not self.drop_hd
             self.say("drop: hi-def pixels" if self.drop_hd
                      else "drop: chunky pixels")
+        elif k in ("[", "]"):
+            step = 0.2 if k == "]" else -0.2
+            self.viz_react = min(2.4, max(0.2, round(self.viz_react + step, 2)))
+            self.say(f"viz beat punch: {self.viz_react:.1f}×")
+        elif k in ("{", "}"):
+            step = 0.2 if k == "}" else -0.2
+            self.viz_speed = min(2.4, max(0.4, round(self.viz_speed + step, 2)))
+            self.say(f"viz flow speed: {self.viz_speed:.1f}×")
         elif k == "\t":
             self.tab = (self.tab + 1) % len(TABS)
         elif k == "SHIFT-TAB":
@@ -1439,7 +1487,9 @@ class App:
                              "terminal too small (need ≥ 60×16)" + RESET)
             sys.stdout.flush()
             return
-        if self.full:
+        if self.viz_max:
+            lines = self._render_viz_max(w, h)
+        elif self.full:
             lines = self._render_now(w, h - 1)
             lines.append(self._render_footer(w))
         else:
@@ -1598,6 +1648,41 @@ class App:
                     " " + fg(RED) + "▌" + fg(WHITE) + plain[1:], w)
             out.append(crop_pad(line, w))
         return out
+
+    def _render_viz_max(self, w, h):
+        """F: the visualizer owns the whole terminal, border to border,
+        with one status line keeping the track and time in reach."""
+        self.eww_flush = True            # flush rendering, no side padding
+        try:
+            lines = self._render_visualizer(w, h - 2)
+        finally:
+            self.eww_flush = False
+        lines = [crop_pad(ln, w) for ln in lines]
+        t = time.time() - self._like_t   # splashes still land on top
+        if t < (1.4 if self._like_mode == "like" else 1.8):
+            splash = (self._like_splash if self._like_mode == "like"
+                      else self._break_splash)
+            lines = splash(lines, w, t)
+
+        pos = self.player.props.get("time-pos")
+        dur = self.player.props.get("duration")
+        if self.now:
+            times = f"{fmt_time(pos)} / {fmt_time(dur)}"
+            left = f" ♪ {self.now.title}"
+            sub = f" · {self.now.artist}"
+            room = w - len(times) - 2
+            if len(left) + len(sub) > room:
+                sub = ""
+                left = left[:room]
+            gap = " " * max(1, w - len(left) - len(sub) - len(times) - 1)
+            lines.append(crop_pad(
+                fg(RED) + " ♪" + BOLD + fg(WHITE) + left[2:] + RESET +
+                fg(GREY) + sub + gap + fg(GREY) + times + RESET, w))
+        else:
+            lines.append(crop_pad(
+                fg(DGREY) + f"{'♪ nothing playing':^{w}}" + RESET, w))
+        lines.append(self._render_footer(w))
+        return lines
 
     def _render_now(self, w, h):
         out = []
@@ -1921,7 +2006,7 @@ class App:
             return 0.5 - 0.5 * np.cos(v * math.tau * P["band"])
         return 0.5 - 0.5 * np.cos(v * math.pi)
 
-    N_PRESETS = 20
+    N_PRESETS = 24
 
     def _drop_field(self, preset, P, xs, ys, r, ang, t, eb, em, et):
         """One milkdrop-ish interference field. Each preset is a different
@@ -2035,11 +2120,36 @@ class App:
                     + sin((xs + ys) * 3 + t)
                     + eb * 2 * sin(r * 8 - t * 3)
                     + et * sin((xs - ys) * 9 - t * 2))
-        # 19: braided radial waves
-        return (sin(r * 8 - ang * A - t * 2)
-                + sin(r * 5 + ang * A + t)
-                + em * sin(ang * 4 + t)
-                + et * 2 * sin(r * 14 - t * 4))
+        if preset == 19:   # braided radial waves
+            return (sin(r * 8 - ang * A - t * 2)
+                    + sin(r * 5 + ang * A + t)
+                    + em * sin(ang * 4 + t)
+                    + et * 2 * sin(r * 14 - t * 4))
+        if preset == 20:   # silk caustics — domain-warped shimmer
+            u = xs + 0.7 * sin(ys * 2.1 + t * 0.8)
+            vv = ys + 0.7 * sin(xs * 1.9 - t * 0.7)
+            return (sin(u * (k1 * 1.6 + 3 * eb)) + sin(vv * k2)
+                    + sin((u + vv) * 2.2 - t * 1.4)
+                    + et * 1.5 * sin((u - vv) * 6 + t * 2))
+        if preset == 21:   # petal tunnel — the walls flex on the kick
+            rr = r * (1.0 + 0.30 * sin(ang * A + t * 0.6))
+            return (sin(k1 * 1.8 / (rr + 0.3) - t * (1.2 + 1.5 * em))
+                    + sin(rr * (5 + 8 * eb) - t * 2)
+                    + sin(ang * A - t * 0.5)
+                    + et * sin(rr * 13 - t * 4))
+        if preset == 22:   # tri-lattice shimmer
+            a1 = xs * k1
+            a2 = (xs * 0.5 + ys * 0.866) * k1
+            a3 = (xs * 0.5 - ys * 0.866) * k1
+            return (sin(a1 + t) + sin(a2 - t * 0.8) + sin(a3 + t * 0.6)
+                    + eb * 2.2 * sin(r * (4 + 5 * eb) - t * 2)
+                    + et * sin(r * 15 - t * 4))
+        # 23: comet swirl — log-spiral arms breathing with the kick
+        sw = ang * A + np.log(r + 0.25) * (k2 + 2 * em)
+        return (sin(sw - t * 1.8)
+                + sin(r * (4 + 9 * eb) - t * 2.2)
+                + sin(sw * 0.5 + t * 0.7)
+                + et * 1.3 * sin(r * 12 + ang * 2 - t * 3))
 
     def _drop_lut(self):
         """64-entry palette: dark → primary → secondary → accent → white."""
@@ -2057,6 +2167,39 @@ class App:
                 lut.append(lerp(stops[a], stops[a + 1], f))
             self._drop_lut_cache = np.array(lut, dtype=float)
         return self._drop_lut_cache
+
+    def _drop_groove(self, raw, dt, now):
+        """Beat-locked drive signals. Raw spectrum jitter is flattened into
+        a slow energy bed; the punch comes from detected bass kicks, and a
+        tempo estimate lets the field bob *between* beats too — so it
+        breathes with the song instead of flickering at it."""
+        rb = raw[0]
+        self._drop_bass_avg = self._drop_bass_avg * 0.985 + rb * 0.015
+        avg = self._drop_bass_avg
+        last = getattr(self, "_beat_t", 0.0)
+        if rb > avg * 1.45 + 0.06 and now - last > 0.22:
+            gaps = getattr(self, "_beat_gaps", [])
+            if last and 0.25 < now - last < 2.0:
+                gaps = (gaps + [now - last])[-8:]
+            self._beat_gaps = gaps
+            self._beat_t = now
+            self._beat_amp = min(1.0, 0.45 + (rb - avg) * 2.0)
+            last = now
+        pulse = getattr(self, "_beat_amp", 0.0) * math.exp(-(now - last) / 0.42)
+        groove = 0.0
+        gaps = getattr(self, "_beat_gaps", [])
+        if len(gaps) >= 4:                     # tempo locked — keep bobbing
+            period = sorted(gaps)[len(gaps) // 2]
+            groove = 0.5 + 0.5 * math.cos((now - last) / period * math.tau)
+        eb, em, et = self._drop_e
+        en = getattr(self, "_drop_energy", 0.2)
+        en += ((eb + em + et) / 3 - en) * min(1.0, dt * 1.2)
+        self._drop_energy = en
+        react = getattr(self, "viz_react", 1.0)
+        b = min(1.4, 0.25 * eb + (0.85 * pulse + 0.18 * groove) * react)
+        m = min(1.2, 0.50 * em + 0.30 * pulse * react)
+        tr = min(1.0, 0.45 * et + 0.20 * groove)
+        return pulse * react, en, b, m, tr
 
     def _viz_drop(self, w, rows, n, pad_l):
         """Milkdrop-ish plasma: interference field warped by bass/mid/treble,
@@ -2084,23 +2227,22 @@ class App:
             e = self._drop_e[i]
             k = min(1.0, (10.0 if x > e else 2.4) * dt)
             self._drop_e[i] = e + (x - e) * k
-        eb, em, et = self._drop_e
-        self._drop_t += dt * (0.5 + 2.2 * em + 1.5 * eb)
+        pulse, en, eb, em, et = self._drop_groove(raw, dt, now)
+        self._drop_t += dt * getattr(self, "viz_speed", 1.0) * \
+            (0.55 + 1.1 * en + 1.6 * pulse)
         t = self._drop_t
 
         # aspect-correct coordinates: half-block pixels are ~square, so the
         # field stops stretching into smears on wide panels (rings stay round)
         aspect = min(W / max(H, 1), 4.5)   # cap so wide strips stay coherent
-        zoom = 1.15
+        zoom = 1.15 / (1.0 + 0.16 * pulse)   # camera punches in on the kick
         ys = np.linspace(-zoom, zoom, H)[:, None]
         xs = np.linspace(-aspect * zoom, aspect * zoom, Wpx)[None, :]
         r = np.sqrt(xs * xs + ys * ys) + 1e-6
         ang = np.arctan2(ys, xs)
 
-        # milkdrop-style preset switching: on a timer, or on a hard bass hit
-        self._drop_bass_avg = self._drop_bass_avg * 0.985 + eb * 0.015
-        beat = (eb > self._drop_bass_avg * 2.0 + 0.15
-                and now - self._drop_last_switch > 7)
+        # milkdrop-style preset switching: on a timer, or on a hard kick
+        beat = pulse > 0.8 and now - self._drop_last_switch > 7
         if (now >= self._drop_switch_at or beat) and self._drop_mix >= 1.0:
             self._drop_prev = self._drop_preset
             self._drop_pb = self._drop_pa
@@ -2126,7 +2268,8 @@ class App:
             v = self._drop_post(self._drop_field(
                 self._drop_preset, self._drop_pa,
                 xs, ys, r, ang, t, eb, em, et), self._drop_pa)
-        bright = 0.26 + 0.74 * min(1.0, (eb + em + et) * 0.9)
+        # brightness: slow mood bed + a lift on the kick — no strobing
+        bright = min(1.0, 0.30 + 0.50 * min(1.0, en * 1.5) + 0.30 * pulse)
         idx = np.clip((v * 63).astype(int), 0, 63)
         rgb = np.clip(self._drop_lut()[idx] * bright, 0, 255).astype(int)
 
@@ -2224,14 +2367,18 @@ class App:
     def _render_footer(self, w):
         if self.status and time.time() - self.status_t < 4:
             return crop_pad("  " + fg(ORANGE) + self.status + RESET, w)
-        if self.full:
+        if self.viz_max:
+            keys = [("F", "exit"), ("v", "viz"), ("c", "theme"),
+                    ("p", "hd"), ("spc", "pause"), ("n/b", "skip"),
+                    ("L", "like"), ("±", "vol"), ("q", "quit")]
+        elif self.full:
             keys = [("f", "exit full"), ("spc", "pause"), ("n/b", "skip"),
                     ("v", "viz"), ("c", "theme"), ("p", "hd"),
                     ("w", "work"), ("±", "vol"), ("q", "quit")]
         else:
             keys = [("/", "find"), ("↵", "play"), ("spc", "pause"),
                     ("n/b", "skip"), ("q", "quit"), ("f", "full"),
-                    ("v", "viz"), ("c", "theme"), ("w", "work"),
+                    ("F", "max viz"), ("v", "viz"), ("c", "theme"), ("w", "work"),
                     ("a", "+queue"), ("A", "→playlist"), ("N", "new pl"),
                     ("x", "remove"), ("L", "like"), (",/.", "seek"),
                     ("±", "vol"), ("s", "shuf"), ("r", "rep"),
