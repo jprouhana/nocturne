@@ -480,6 +480,23 @@ def sc_playlist_tracks(pl, n=500):
         return []
 
 
+def weave(a, b):
+    """Merge two newest-first lists so each keeps its order and both
+    spread evenly through the result — the closest thing to a date
+    merge available, since YT Music never exposes liked-at timestamps
+    (soundcloud does, but a one-sided date is no date)."""
+    out, i, j = [], 0, 0
+    la, lb = max(len(a), 1), max(len(b), 1)
+    while i < len(a) or j < len(b):
+        if j >= len(b) or (i < len(a) and i / la <= j / lb):
+            out.append(a[i])
+            i += 1
+        else:
+            out.append(b[j])
+            j += 1
+    return out
+
+
 def sc_like(track, on=True):
     """Like/unlike on the soundcloud side: resolve the permalink to a
     track id, then PUT/DELETE the like."""
@@ -2268,7 +2285,7 @@ class App:
                                for t in data.get("tracks", [])
                                if t.get("videoId")]
                 sc_part = sc_likes(sct) if sct else []
-                self.lib = yt_part + sc_part
+                self.lib = weave(yt_part, sc_part)
                 msg = f"{len(yt_part)} liked songs"
                 if sc_part:
                     msg += f" + {len(sc_part)} ☁"
@@ -2544,7 +2561,7 @@ class App:
         self._like_mode = "like"
         self.liked_now = True
         if all(x.video_id != trk.video_id for x in self.lib):
-            self.lib.append(trk)         # the ☁ section lives at the tail
+            self.lib.insert(0, trk)      # newest likes live at the top
 
         def work():
             if sc_like(trk, on=True):
@@ -2586,11 +2603,12 @@ class App:
             try:
                 data = self._lib_call(
                     lambda: self.yt.get_liked_songs(limit=300))
-                # the ☁ section survives the YT-side refresh
-                self.lib = [Track.from_item(t)
-                            for t in data.get("tracks", [])
-                            if t.get("videoId")] + \
-                    [t for t in self.lib if t.source == "sc"]
+                # the ☁ half survives the YT-side refresh, re-woven
+                self.lib = weave(
+                    [Track.from_item(t)
+                     for t in data.get("tracks", [])
+                     if t.get("videoId")],
+                    [t for t in self.lib if t.source == "sc"])
                 self.sel[1] = min(self.sel[1], max(len(self.lib) - 1, 0))
             except Exception:
                 pass
