@@ -162,6 +162,8 @@ def ansi_cells(s, w):
 def put_cell(cells, i, sgr, ch):
     if i < 0 or i >= len(cells):
         return
+    if cells[i][1] == KITTY_MARK:   # never bury the bitmap's anchor cell
+        return
     if cells[i][1] == "":                       # tail of a wide char
         cells[i - 1] = ("", " ")
     elif i + 1 < len(cells) and cells[i + 1][1] == "":
@@ -3254,11 +3256,16 @@ class App:
         panels — this way the terminal scales the 512px source exactly
         once. Transmitted per track (id 93), re-placed per frame."""
         on = getattr(self, "viz_art", 0) and getattr(self, "now", None)
-        a = self.art.rgb(getattr(self.now, "thumb", "")) if on else None
+        # step aside while a heart splash plays — the cover sits at z≥0,
+        # which draws over text, and the heart IS text
+        splash = time.time() - getattr(self, "_like_t", 0) < 1.9
+        a = self.art.rgb(getattr(self.now, "thumb", "")) \
+            if on and not splash else None
         if a is None:
             if getattr(self, "_kitty_art_live", False):
                 self._kitty_art_live = False
-                self._kitty_art_key = None
+                if not splash:      # keep the shipped pixels for after
+                    self._kitty_art_key = None
                 return ["\x1b_Ga=d,d=i,i=93,q=2\x1b\\"]
             return []
         cw, ch = self._cell_px()
@@ -3376,11 +3383,11 @@ class App:
                           or getattr(self, "menu", False)
                           or getattr(self, "help", False)):
             mode = 1     # overlays composite into text cells, not bitmaps
-        if mode == 2 and time.time() - getattr(self, "_like_t", 0) < 1.9:
-            # splash frames: the heart composites into text cells too, but
-            # chunky renders several times faster than quadrants — the
-            # animation stays at full frame rate instead of stuttering
-            mode = 0
+        # the heart splash does NOT kick pixel mode out: it stamps
+        # fg-only half-blocks onto the blank marker lines — the empty
+        # halves show the live bitmap through, and parsing blank lines
+        # costs nothing (parsing a fullscreen of SGR-dense chunky text
+        # every frame was what made the splash stutter)
         # chunky is supersampled 2× because its grid is so coarse that
         # radial cores alias into staircases — averaging 4 subsamples
         # per pixel costs nothing at that size
@@ -3670,10 +3677,17 @@ class App:
         line, used = "  ", 2
         for i, (k, v) in enumerate(keys):
             piece = (("" if i == 0 else " · ") + f"{k} {v}")
-            if used + len(piece) > w - 1:
+            if used + len(piece) + (2 if k == "?" else 0) > w - 1:
                 break
-            line += (("" if i == 0 else fg(DGREY) + " · ") +
-                     fg(RED) + k + fg(DGREY) + " " + v)
+            if k == "?":
+                # the door to every other command — render it as a chip
+                # so it can't fade into the hint soup
+                hint = (bg(RED) + BOLD + fg(WHITE) + " ? " + RESET +
+                        fg(GREY) + " " + v)
+                used += 2
+            else:
+                hint = fg(RED) + k + fg(DGREY) + " " + v
+            line += ("" if i == 0 else fg(DGREY) + " · ") + hint
             used += len(piece)
         return crop_pad(line + RESET, w)
 
