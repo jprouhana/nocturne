@@ -1739,7 +1739,6 @@ class App:
             lines = self._render_visualizer(w, h - 2)
         finally:
             self.eww_flush = False
-        lines = [crop_pad(ln, w) for ln in lines]
         t = time.time() - self._like_t   # splashes still land on top
         if t < (1.4 if self._like_mode == "like" else 1.8):
             splash = (self._like_splash if self._like_mode == "like"
@@ -2367,8 +2366,12 @@ class App:
         # field stops stretching into smears on wide panels (rings stay round)
         aspect = min(W / max(H, 1), 4.5)   # cap so wide strips stay coherent
         zoom = 1.15 / (1.0 + 0.16 * ps)    # camera swells in on the kick
-        ys = np.linspace(-zoom, zoom, Hpx)[:, None]
-        xs = np.linspace(-aspect * zoom, aspect * zoom, Wpx)[None, :]
+        # sample budget: maximized terminals ask for ~10× the pixels of the
+        # side panel — compute the field at a capped resolution and stretch
+        fs = max(1.0, math.sqrt(Wpx * Hpx / 140_000))
+        fw, fh = max(8, int(Wpx / fs)), max(8, int(Hpx / fs))
+        ys = np.linspace(-zoom, zoom, fh)[:, None]
+        xs = np.linspace(-aspect * zoom, aspect * zoom, fw)[None, :]
 
         def coords(P):
             # each preset roll carries its own origin — radial fields can
@@ -2408,50 +2411,58 @@ class App:
                 *coords(self._drop_pa), t, eb, em, et), self._drop_pa)
         # brightness: slow mood bed + a lift on the kick — no strobing
         bright = min(1.0, 0.30 + 0.50 * min(1.0, en * 1.5) + 0.30 * ps)
-        idx = np.clip((v * 63).astype(int), 0, 63)
-        rgb = np.clip(self._drop_lut()[idx] * bright, 0, 255)
+        idxf = np.clip(v * 63, 0, 63)          # palette space, float
+        if (fw, fh) != (Wpx, Hpx):
+            # maximized panels: the field was computed under a sample
+            # budget — stretch it back up (nearest is invisible at cell
+            # size and keeps the frame inside the tick)
+            yi = np.linspace(0, fh - 1, Hpx).astype(int)
+            xi = np.linspace(0, fw - 1, Wpx).astype(int)
+            idxf = idxf[yi][:, xi]
         if ss > 1:
             # silk: average the oversampled field down — banding edges
             # melt into gradients instead of stair-stepping
-            rgb = rgb.reshape(H, ss, Wpx // ss, ss, 3).mean(axis=(1, 3))
-        rgb = rgb.astype(int)
+            idxf = idxf.reshape(H, ss, Wpx // ss, ss).mean(axis=(1, 3))
+
+        # 64 palette escape strings per frame — cells become table lookups
+        # instead of formatting six ints each (this is the fps)
+        cols = np.clip(self._drop_lut() * bright, 0, 255).astype(int)
+        fgs = [f"\x1b[38;2;{c[0]};{c[1]};{c[2]}m" for c in cols]
+        bgs = [f"\x1b[48;2;{c[0]};{c[1]};{c[2]}m" for c in cols]
+        left, right = " " * pad, " " * (w - pad - W)
 
         lines = []
         if not mode:
-            for row in range(rows):
-                top, bot = rgb[row * 2], rgb[row * 2 + 1]
-                cells = [f"\x1b[38;2;{tp[0]};{tp[1]};{tp[2]}m"
-                         f"\x1b[48;2;{bt[0]};{bt[1]};{bt[2]}m▀"
-                         for tp, bt in zip(top, bot)]
-                lines.append(crop_pad(" " * pad + "".join(cells) + RESET, w))
+            ti = idxf[0::2].astype(int)
+            bi = idxf[1::2].astype(int)
+            for rr in range(rows):
+                tl, bl = ti[rr].tolist(), bi[rr].tolist()
+                lines.append(left + "".join(
+                    fgs[a] + bgs[b] + "▀" for a, b in zip(tl, bl)) +
+                    RESET + right)
             return lines
 
-        # hi-def: pack each 2×2 pixel block into a quadrant glyph whose
-        # fg/bg split follows the brighter/darker pixels of the block
-        a = rgb.reshape(rows, 2, W, 2, 3).astype(float)
-        lum = a.mean(axis=-1)                              # rows,2,W,2
-        mean = lum.mean(axis=(1, 3), keepdims=True)
-        mask = lum >= mean
+        # hi-def/silk: pack each 2×2 block into a quadrant glyph split on
+        # the brighter half; colors average in palette space (the LUT is
+        # luminance-monotonic, so the mean index is the mean color)
+        q = idxf.reshape(rows, 2, W, 2)
+        mean = q.mean(axis=(1, 3), keepdims=True)
+        mask = q >= mean
         cnt = mask.sum(axis=(1, 3))
-        on = mask[..., None]
-        fgc = ((a * on).sum(axis=(1, 3)) /
-               np.clip(cnt, 1, 4)[..., None]).astype(int)
-        bgc = ((a * ~on).sum(axis=(1, 3)) /
-               np.clip(4 - cnt, 1, 4)[..., None]).astype(int)
+        fgi = ((q * mask).sum(axis=(1, 3)) /
+               np.clip(cnt, 1, 4)).astype(int)
+        bgi = ((q * ~mask).sum(axis=(1, 3)) /
+               np.clip(4 - cnt, 1, 4)).astype(int)
+        flat = cnt == 4                        # uniform block: bg = fg
+        bgi[flat] = fgi[flat]
         bits = (mask[:, 0, :, 0].astype(int) * 8 + mask[:, 0, :, 1] * 4 +
                 mask[:, 1, :, 0] * 2 + mask[:, 1, :, 1])
         for rr in range(rows):
-            cells = []
-            for cc in range(W):
-                bi = bits[rr, cc]
-                f, b = fgc[rr, cc], bgc[rr, cc]
-                if bi == 0:
-                    f = b
-                elif bi == 15:
-                    b = f
-                cells.append(f"\x1b[38;2;{f[0]};{f[1]};{f[2]}m"
-                             f"\x1b[48;2;{b[0]};{b[1]};{b[2]}m{QUADS[bi]}")
-            lines.append(crop_pad(" " * pad + "".join(cells) + RESET, w))
+            fl, bl = fgi[rr].tolist(), bgi[rr].tolist()
+            btl = bits[rr].tolist()
+            lines.append(left + "".join(
+                fgs[f] + bgs[b] + QUADS[bt]
+                for f, b, bt in zip(fl, bl, btl)) + RESET + right)
         return lines
 
     def _viz_bands(self, w, rows, n, pad_l):
@@ -2560,9 +2571,7 @@ class App:
                 # drop flows at ~30 fps; other styles tick the UI at ~25
                 # (smooth progress bar) with the visualizer itself cached
                 # down to ~12; idle screen is lazier
-                if self.now and self.viz_style == "drop":
-                    tick = 0.04
-                elif self.now or self.input_mode:
+                if self.now or self.input_mode or self.viz_max:
                     tick = 0.04
                 else:
                     tick = 0.12
