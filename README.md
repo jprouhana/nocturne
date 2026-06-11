@@ -16,6 +16,11 @@ tagged `☁` — same queue, same radio (`R` on a SoundCloud track fills the
 queue from its recommended shelf), no API keys, no SoundCloud account.
 Toggle it in the `M` menu if you want YT only.
 
+Optionally, `ytm --sc-login` lifts your SoundCloud session out of the
+browser (locally, chmod 600, same privacy contract as the YT side):
+your ☁ likes join the library tab, `L` likes/unlikes on SoundCloud
+itself, and Go+/private tracks become playable.
+
 The `drop` visualizer is a milkdrop-style plasma — forty-three field equations
 that morph and crossfade to the beat, driven by the real audio spectrum. Its
 sibling `cover` is the same engine painted with the current album's colors:

@@ -13,6 +13,7 @@ Usage:
   ytm --oauth         sign in with a YouTube-scoped OAuth token (no cookies)
   ytm --login         interactive sign-in wizard (pick your browser)
   ytm --auth-firefox  import your session from Firefox's cookie store
+  ytm --sc-login      sign in to soundcloud (likes join the library)
   ytm --doctor        check that all dependencies are healthy
 """
 
@@ -50,6 +51,8 @@ CONFIG_DIR = os.path.expanduser("~/.config/ytm-tui")
 AUTH_FILE = os.path.join(CONFIG_DIR, "browser.json")
 OAUTH_FILE = os.path.join(CONFIG_DIR, "oauth.json")
 OAUTH_CLIENT = os.path.join(CONFIG_DIR, "oauth_client.json")
+SC_FILE = os.path.join(CONFIG_DIR, "soundcloud.json")
+SC_COOKIES = os.path.join(CONFIG_DIR, "sc_cookies.txt")
 STATE_FILE = os.path.join(CONFIG_DIR, "state.json")
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64; rv:151.0) "
@@ -272,6 +275,9 @@ def _sc_extract(target, n):
     opts = {"quiet": True, "no_warnings": True, "extract_flat": True,
             "playlistend": n, "skip_download": True, "ignoreerrors": True,
             "logger": _SC_SILENT}
+    tok = sc_token()
+    if tok:
+        opts.update({"username": "oauth", "password": tok})
     try:
         with yt_dlp.YoutubeDL(opts) as y:
             data = y.extract_info(target, download=False)
@@ -306,9 +312,13 @@ def _sc_probe(tracks, keep=12, workers=6):
     except ImportError:
         return tracks[:keep]
 
+    tok = sc_token()
+
     def probe(t):
         opts = {"quiet": True, "no_warnings": True, "skip_download": True,
                 "logger": _SC_SILENT}
+        if tok:
+            opts.update({"username": "oauth", "password": tok})
         try:
             with yt_dlp.YoutubeDL(opts) as y:
                 info = y.extract_info(t.video_id, download=False)
@@ -325,6 +335,179 @@ def _sc_probe(tracks, keep=12, workers=6):
 
 def sc_search(query, n=12):
     return _sc_probe(_sc_extract(f"scsearch{n}:{query}", n), keep=n)
+
+
+# ── soundcloud sign-in (optional) ─────────────────────────────────────────────
+# guest mode covers search/play/radio; signing in adds YOUR likes to the
+# library, L on ☁ tracks, and Go+/private streams. The session is the
+# browser's `oauth_token` cookie — lifted locally, stored chmod 600,
+# never leaves the machine. Same privacy contract as the YT side.
+
+def sc_token():
+    try:
+        with open(SC_FILE) as f:
+            return json.load(f).get("oauth_token") or ""
+    except Exception:
+        return ""
+
+
+def _sc_client_id():
+    """Borrow yt-dlp's anonymous client_id (it scrapes + caches one and
+    keeps it healthy across soundcloud's rotations)."""
+    try:
+        import yt_dlp
+        y = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True,
+                              "logger": _SC_SILENT})
+        ie = y.get_info_extractor("Soundcloud")
+        ie._initialize_pre_login()
+        return getattr(ie, "_CLIENT_ID", "") or ""
+    except Exception:
+        return ""
+
+
+def _sc_get(url, token, method="GET"):
+    import urllib.request
+    req = urllib.request.Request(url, method=method, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Authorization": f"OAuth {token}"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        body = r.read()
+    return json.loads(body) if body.strip() else {}
+
+
+def sc_me(token):
+    try:
+        d = _sc_get("https://api-v2.soundcloud.com/me?client_id="
+                    + _sc_client_id(), token)
+        return d.get("username") or "", d.get("id") or 0
+    except Exception:
+        return "", 0
+
+
+def _sc_track_of(tr):
+    return Track(tr.get("permalink_url") or "", tr.get("title") or "?",
+                 (tr.get("user") or {}).get("username") or "SoundCloud",
+                 album="SoundCloud",
+                 duration=fmt_time((tr.get("duration") or 0) / 1000),
+                 thumb=tr.get("artwork_url") or "")
+
+
+def sc_likes(token, n=200):
+    """Your soundcloud likes, newest first."""
+    cid = _sc_client_id()
+    url = (f"https://api-v2.soundcloud.com/me/track_likes"
+           f"?client_id={cid}&limit=100")
+    out = []
+    try:
+        while url and len(out) < n:
+            d = _sc_get(url, token)
+            for it in d.get("collection") or []:
+                t = _sc_track_of(it.get("track") or {})
+                if t.video_id:
+                    out.append(t)
+            nxt = d.get("next_href")
+            url = (nxt + ("&" if "?" in nxt else "?")
+                   + f"client_id={cid}") if nxt else None
+    except Exception:
+        pass
+    return out[:n]
+
+
+def sc_like(track, on=True):
+    """Like/unlike on the soundcloud side: resolve the permalink to a
+    track id, then PUT/DELETE the like."""
+    token = sc_token()
+    if not token:
+        return False
+    try:
+        import urllib.parse
+        cid = _sc_client_id()
+        uid = 0
+        try:
+            with open(SC_FILE) as f:
+                uid = json.load(f).get("user_id") or 0
+        except Exception:
+            pass
+        if not uid:
+            _, uid = sc_me(token)
+        tr = _sc_get("https://api-v2.soundcloud.com/resolve?url="
+                     + urllib.parse.quote(track.video_id, safe="")
+                     + f"&client_id={cid}", token)
+        _sc_get(f"https://api-v2.soundcloud.com/users/{uid}"
+                f"/track_likes/{tr['id']}?client_id={cid}", token,
+                method="PUT" if on else "DELETE")
+        return True
+    except Exception:
+        return False
+
+
+def sc_login():
+    """ytm --sc-login: lift the soundcloud session out of a browser the
+    same way --login does for YT. Nothing is typed, nothing is sent
+    anywhere but soundcloud itself."""
+    print("→ looking for a soundcloud session in your browsers…")
+    found, src = "", ""
+    for db in firefox_cookie_dbs():                 # firefox family
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = os.path.join(td, "cookies.sqlite")
+                shutil.copyfile(db, tmp)
+                for ext in ("-wal", "-shm"):
+                    if os.path.isfile(db + ext):
+                        shutil.copyfile(db + ext, tmp + ext)
+                con = sqlite3.connect(tmp)
+                rows = con.execute(
+                    "SELECT value FROM moz_cookies WHERE host LIKE "
+                    "'%soundcloud.com' AND name='oauth_token' "
+                    "ORDER BY lastAccessed DESC").fetchall()
+                con.close()
+            if rows and rows[0][0]:
+                found, src = rows[0][0], db
+                break
+        except Exception:
+            continue
+    if not found:                                   # chromium family
+        try:
+            from yt_dlp.cookies import extract_cookies_from_browser
+            for b in ("chrome", "chromium", "brave", "edge",
+                      "vivaldi", "opera"):
+                try:
+                    jar = extract_cookies_from_browser(b)
+                except Exception:
+                    continue
+                for c in jar:
+                    if c.domain.endswith("soundcloud.com") and \
+                            c.name == "oauth_token" and c.value:
+                        found, src = c.value, b
+                        break
+                if found:
+                    break
+        except ImportError:
+            pass
+    if not found:
+        print("✗ no soundcloud login found.")
+        print("  Log in at https://soundcloud.com in your browser,")
+        print("  then run:  ytm --sc-login")
+        return False
+    who, uid = sc_me(found)
+    if not who:
+        print("✗ found a token but soundcloud rejected it —")
+        print("  log in again in the browser and retry")
+        return False
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(SC_FILE, "w") as f:
+        json.dump({"oauth_token": found, "user_id": uid}, f)
+    os.chmod(SC_FILE, 0o600)
+    # a cookies.txt twin lets mpv's yt-dlp hook log in too (Go+/private
+    # streams) — yt-dlp picks the oauth_token cookie up on its own
+    with open(SC_COOKIES, "w") as f:
+        f.write("# Netscape HTTP Cookie File\n"
+                ".soundcloud.com\tTRUE\t/\tTRUE\t2147483647\t"
+                f"oauth_token\t{found}\n")
+    os.chmod(SC_COOKIES, 0o600)
+    print(f"✓ soundcloud: signed in as {who}  (session from {src})")
+    print(f"  token lives in {SC_FILE} (chmod 600) and never leaves")
+    return True
 
 
 def sc_related(track):
@@ -355,6 +538,11 @@ class Player:
             "--ytdl-format=bestaudio[acodec^=opus]/bestaudio/best",
             "--cache=yes", "--cache-secs=30",
         ]
+        if os.path.isfile(SC_COOKIES):
+            # signed-in soundcloud: the hook's yt-dlp logs in via the
+            # cookie jar (Go+/private streams). a path in ps is fine —
+            # the token itself never appears on the command line
+            args.append("--ytdl-raw-options-append=cookies=" + SC_COOKIES)
         if ao:
             args.append(f"--ao={ao}")
         self.proc = subprocess.Popen(
@@ -1409,18 +1597,27 @@ class App:
         if self._lib_fetched:
             return
         self._lib_fetched = True
-        if not self.authed:
+        sct = sc_token()
+        if not self.authed and not sct:
             self.say("library needs sign-in → quit and run: ytm --login")
             return
         self.loading_msg = "loading liked songs…"
 
         def work():
             try:
-                data = self._lib_call(
-                    lambda: self.yt.get_liked_songs(limit=300))
-                self.lib = [Track.from_item(t) for t in data.get("tracks", [])
-                            if t.get("videoId")]
-                self.say(f"{len(self.lib)} liked songs")
+                yt_part = []
+                if self.authed:
+                    data = self._lib_call(
+                        lambda: self.yt.get_liked_songs(limit=300))
+                    yt_part = [Track.from_item(t)
+                               for t in data.get("tracks", [])
+                               if t.get("videoId")]
+                sc_part = sc_likes(sct) if sct else []
+                self.lib = yt_part + sc_part
+                msg = f"{len(yt_part)} liked songs"
+                if sc_part:
+                    msg += f" + {len(sc_part)} ☁"
+                self.say(msg)
             except Exception as e:
                 self._lib_fetched = False
                 self.say(f"library failed: {e}")
@@ -1523,7 +1720,7 @@ class App:
         self.qpos = idx
         self.now = self.queue[idx]
         self.liked_now = False
-        if self.authed:
+        if self.authed or self.now.source == "sc":
             self._fetch_like_state(self.now.video_id)
         self.player.play_video(self.now.video_id)
         self._write_now()
@@ -1595,7 +1792,9 @@ class App:
     def _fetch_like_state(self, vid):
         """The header ♥ (and the L toggle) should know whether the track
         is already liked, not just whether it was liked this session."""
-        if vid.startswith("http"):      # soundcloud — no YT like state
+        if vid.startswith("http"):
+            # soundcloud — liked iff it's in the library's ☁ section
+            self.liked_now = any(t.video_id == vid for t in self.lib)
             return
 
         def work():
@@ -1612,7 +1811,7 @@ class App:
         if not self.now:
             return
         if self.now.source == "sc":
-            self.say("☁ soundcloud track — your YT library can't hold it")
+            self._sc_like_toggle(self.now)
             return
         if not self.authed:
             self.say("liking needs sign-in → ytm --login")
@@ -1656,6 +1855,39 @@ class App:
                     self.liked_now = False
         threading.Thread(target=work, daemon=True).start()
 
+    def _sc_like_toggle(self, trk):
+        """L on a ☁ track: same heart, soundcloud-side like — optimistic
+        like everything else, the api call lands behind the splash."""
+        if not sc_token():
+            self.say("☁ run: ytm --sc-login  to like soundcloud tracks")
+            return
+        if self.liked_now:
+            self._like_t = time.time()
+            self._like_mode = "break"
+            self.liked_now = False
+            self.lib = [x for x in self.lib if x.video_id != trk.video_id]
+            self.sel[1] = min(self.sel[1], max(len(self.lib) - 1, 0))
+
+            def work():
+                self.say(f"♡ unliked on ☁: {trk.title}"
+                         if sc_like(trk, on=False) else "☁ unlike failed")
+            threading.Thread(target=work, daemon=True).start()
+            return
+        self._like_t = time.time()
+        self._like_mode = "like"
+        self.liked_now = True
+        if all(x.video_id != trk.video_id for x in self.lib):
+            self.lib.append(trk)         # the ☁ section lives at the tail
+
+        def work():
+            if sc_like(trk, on=True):
+                self.say(f"♥ liked on ☁: {trk.title}")
+            else:
+                self.say("☁ like failed")
+                if self.now and self.now.video_id == trk.video_id:
+                    self.liked_now = False
+        threading.Thread(target=work, daemon=True).start()
+
     # ── library write ops ────────────────────────────────────────────────────
     def _pl_refresh(self):
         """Quietly re-pull the open playlist so it tracks reality."""
@@ -1687,9 +1919,11 @@ class App:
             try:
                 data = self._lib_call(
                     lambda: self.yt.get_liked_songs(limit=300))
+                # the ☁ section survives the YT-side refresh
                 self.lib = [Track.from_item(t)
                             for t in data.get("tracks", [])
-                            if t.get("videoId")]
+                            if t.get("videoId")] + \
+                    [t for t in self.lib if t.source == "sc"]
                 self.sel[1] = min(self.sel[1], max(len(self.lib) - 1, 0))
             except Exception:
                 pass
@@ -1773,6 +2007,13 @@ class App:
         if track in self.lib:                    # gone from the list NOW
             self.lib.remove(track)
         self.sel[1] = min(self.sel[1], max(len(self.lib) - 1, 0))
+        if track.source == "sc":
+
+            def work():
+                self.say(f"♡ unliked on ☁: {track.title}"
+                         if sc_like(track, on=False) else "☁ unlike failed")
+            threading.Thread(target=work, daemon=True).start()
+            return
 
         def work():
             try:
@@ -4040,6 +4281,9 @@ def doctor():
         except ImportError:
             print(f"  ✗ python:{mod} MISSING")
             ok = False
+    print(f"  {'✓' if sc_token() else '○'} soundcloud "
+          + ("signed in" if sc_token()
+             else "guest (search/play works; ytm --sc-login for likes)"))
     term = os.environ.get("TERM", "?")
     prog = os.environ.get("TERM_PROGRAM", "")
     gfx = App._kitty_sniff()
@@ -4256,6 +4500,9 @@ def main():
     ap.add_argument("--oauth", action="store_true",
                     help="sign in via Google OAuth device flow — no "
                          "browser cookies, YouTube-scoped, revocable")
+    ap.add_argument("--sc-login", action="store_true",
+                    help="sign in to soundcloud (lifts the session from "
+                         "your browser — likes land in the library)")
     ap.add_argument("--auth-firefox", action="store_true",
                     help="import session from Firefox cookies")
     ap.add_argument("--auth-browser", metavar="NAME",
@@ -4294,6 +4541,8 @@ def main():
                                  args.eww_theme, args.eww_frame) else 1)
     if args.login:
         sys.exit(0 if login_wizard() else 1)
+    if args.sc_login:
+        sys.exit(0 if sc_login() else 1)
     if args.oauth:
         sys.exit(0 if oauth_login() else 1)
     if args.auth:
