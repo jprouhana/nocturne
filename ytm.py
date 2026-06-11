@@ -306,7 +306,7 @@ def _sc_extract(target, n):
     return out
 
 
-def _sc_probe(tracks, keep=12, workers=6):
+def _sc_probe(tracks, keep=12, workers=10):
     """Major-label uploads are DRM-locked and indistinguishable in the
     flat search payload — fully resolve each candidate in parallel and
     keep only what will actually play. ~4-5s for a dozen, which is fine
@@ -689,14 +689,15 @@ class Player:
     def cmd(self, *args):
         self._send({"command": list(args)})
 
-    def play_video(self, video_id):
+    def play_video(self, video_id, direct=None):
         self._loading = True
         self.props["time-pos"] = None
         self.props["duration"] = None
         # soundcloud (and any other yt-dlp-able source) tracks carry a
-        # full URL where YT tracks carry a bare video id
-        url = video_id if video_id.startswith("http") \
-            else f"https://music.youtube.com/watch?v={video_id}"
+        # full URL where YT tracks carry a bare video id; a prefetched
+        # direct stream URL bypasses the ytdl hook entirely
+        url = direct or (video_id if video_id.startswith("http")
+                         else f"https://music.youtube.com/watch?v={video_id}")
         self.cmd("loadfile", url)
         self.cmd("set_property", "pause", False)
 
@@ -927,22 +928,26 @@ class SpectrumTap:
 
 class ArtCache:
     def __init__(self):
-        self._cache = {}   # (url, w, h) -> list[str]
+        self._cache = {}   # (url, w, h, floor) -> list[str]
         self._fetching = set()
         self._lock = threading.Lock()
+        # when set (shader guard), art pixels are floored above the
+        # luminance cutoff of background-keying terminal shaders so
+        # covers render solid instead of dissolving into the wallpaper
+        self.floor = None
 
     def get(self, url, w, h):
         """Return rendered art lines, or None and fetch in background."""
         if not url:
             return None
-        key = (url, w, h)
+        key = (url, w, h, self.floor)
         with self._lock:
             if key in self._cache:
                 return self._cache[key]
             if key in self._fetching:
                 return None
             self._fetching.add(key)
-        threading.Thread(target=self._fetch, args=(url, w, h),
+        threading.Thread(target=self._fetch, args=(url, w, h, self.floor),
                          daemon=True).start()
         return None
 
@@ -1034,8 +1039,8 @@ class ArtCache:
             with self._lock:
                 self._fetching.discard(("pal", url))
 
-    def _fetch(self, url, w, h):
-        key = (url, w, h)
+    def _fetch(self, url, w, h, floor=None):
+        key = (url, w, h, floor)
         try:
             from PIL import Image
             import io
@@ -1055,6 +1060,9 @@ class ArtCache:
                 for col in range(w):
                     t = px[col, row * 2]
                     b = px[col, row * 2 + 1]
+                    if floor:
+                        t = tuple(max(v, f) for v, f in zip(t, floor))
+                        b = tuple(max(v, f) for v, f in zip(b, floor))
                     parts.append(fg(t) + bg(b) + "▀")
                 lines.append("".join(parts) + RESET)
             with self._lock:
@@ -2263,6 +2271,8 @@ class App:
                              volume=state.get("volume", 70))
         self.art = ArtCache()
         self.tap = SpectrumTap()
+        self._url_cache = {}      # video_id → (direct stream url, ts)
+        self._art_dims = (28, 14)  # last art-panel size, for prefetching
         self.peaks: list[float] = []
 
         self.tab = 0
@@ -2333,6 +2343,8 @@ class App:
         # shaders (ghostty starfields etc.) so the plasma and the cover
         # don't dissolve into the wallpaper
         self.shader_guard = int(state.get("shader_guard", 0))
+        if self.shader_guard:
+            self.art.floor = self.SHADER_FLOOR
         self.sc_on = int(state.get("sc_on", 1))  # ☁ merged soundcloud
         self.full = False
         self.viz_max = False      # F: visualizer owns the whole terminal
@@ -2672,9 +2684,58 @@ class App:
         self.liked_now = False
         if self.authed or self.now.source == "sc":
             self._fetch_like_state(self.now.video_id)
-        self.player.play_video(self.now.video_id)
+        # a prefetched direct stream skips mpv's yt-dlp resolve (~1-3s)
+        hit = self._url_cache.get(self.now.video_id)
+        direct = hit[0] if hit and time.time() - hit[1] < 3000 else None
+        self.player.play_video(self.now.video_id, direct=direct)
         self._write_now()
         self.say(f"▶ {self.now.title}")
+        self._prefetch()
+
+    def _resolve_stream(self, vid):
+        """Resolve a track to its direct audio URL ourselves — the same
+        thing mpv's hook does, done ahead of time."""
+        import yt_dlp
+        target = vid if vid.startswith("http") \
+            else f"https://music.youtube.com/watch?v={vid}"
+        opts = {"quiet": True, "no_warnings": True, "logger": _SC_SILENT,
+                "format": "bestaudio[acodec^=opus]/bestaudio/best",
+                "skip_download": True}
+        tok = sc_token()
+        if vid.startswith("http") and tok:
+            opts.update({"username": "oauth", "password": tok})
+        with yt_dlp.YoutubeDL(opts) as y:
+            info = y.extract_info(target, download=False)
+        return (info or {}).get("url") or ""
+
+    def _prefetch(self):
+        """While this track plays, get the NEXT one ready: its stream
+        URL (instant skip) and its artwork (no blank art panel) — plus
+        the current track's art in every size the UI uses."""
+        cur, nxt = self.now, None
+        if 0 <= self.qpos + 1 < len(self.queue):
+            nxt = self.queue[self.qpos + 1]
+
+        def work():
+            for t in (cur, nxt):
+                if not t:
+                    continue
+                self.art.rgb(t.thumb)
+                self.art.palette(t.thumb)
+                w, h = self._art_dims
+                self.art.get(t.thumb, w, h)
+            if nxt and nxt.video_id not in self._url_cache:
+                try:
+                    u = self._resolve_stream(nxt.video_id)
+                    if u:
+                        self._url_cache[nxt.video_id] = (u, time.time())
+                        if len(self._url_cache) > 24:   # oldest out
+                            old = min(self._url_cache,
+                                      key=lambda k: self._url_cache[k][1])
+                            del self._url_cache[old]
+                except Exception:
+                    pass
+        threading.Thread(target=work, daemon=True).start()
 
     def next_track(self):
         if self.qpos + 1 < len(self.queue):
@@ -3122,6 +3183,9 @@ class App:
                                              else -step)
                 cur = min(hi, max(lo, round(cur, 2)))
                 setattr(self, attr, int(cur) if isinstance(step, int) else cur)
+                if attr == "shader_guard":
+                    self.art.floor = (self.SHADER_FLOOR
+                                      if self.shader_guard else None)
             return
 
         if self.help:
@@ -3791,6 +3855,7 @@ class App:
         if not self.work:
             art_w = art_h * 2
             pad_l = max((w - art_w) // 2, 1)
+            self._art_dims = (art_w, art_h)
             art = self.art.get(self.now.thumb, art_w, art_h)
             for row in range(art_h):
                 if art:
@@ -4674,22 +4739,19 @@ class App:
 
     SHADER_FLOOR = (42, 46, 64)   # clears luminance-keyed shader cutoffs
 
-    def _drop_guard_lut(self, lut):
-        if not getattr(self, "shader_guard", 0):
-            return lut
-        import numpy as np
-        return np.maximum(lut, np.array(self.SHADER_FLOOR, float))
-
     def _drop_lut(self):
         """64-entry palette: dark → primary → secondary → accent → white.
-        In cover mode the gradient comes from the album art instead."""
+        In cover mode the gradient comes from the album art instead.
+        Deliberately NOT shader-guarded: the visualizer's darks staying
+        transparent over the terminal wallpaper is the look — the guard
+        protects album ART only."""
         if getattr(self, "viz_style", "") == "cover":
             now = getattr(self, "now", None)
             art = getattr(self, "art", None)
             if now is not None and art is not None:
                 pal = art.palette(getattr(now, "thumb", ""))
                 if pal is not None:
-                    return self._drop_guard_lut(pal)
+                    return pal
         if self._drop_lut_cache is None:
             import numpy as np
             # anchored dark lows so light themes (ice…) still have contrast
@@ -4703,7 +4765,7 @@ class App:
                 f = (t - pos[a]) / (pos[a + 1] - pos[a])
                 lut.append(lerp(stops[a], stops[a + 1], f))
             self._drop_lut_cache = np.array(lut, dtype=float)
-        return self._drop_guard_lut(self._drop_lut_cache)
+        return self._drop_lut_cache
 
     def _drop_groove(self, raw, dt, now):
         """Beat-locked drive signals. Raw spectrum jitter is flattened into
