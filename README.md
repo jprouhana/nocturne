@@ -17,6 +17,26 @@ sibling `cover` is the same engine painted with the current album's colors:
 
 ![drop visualizer](assets/visualizer.gif)
 
+## use a real terminal
+
+ytm runs in anything, but the visuals are built for a GPU-accelerated
+terminal that speaks the kitty graphics protocol —
+**[ghostty](https://ghostty.org)**, **[kitty](https://sw.kovidgoyal.net/kitty/)**
+or **[WezTerm](https://wezterm.org)**. In one of those, `p` unlocks the
+**pixel** renderer: the plasma drawn as a true RGB bitmap, real screen
+pixels, album art at native resolution, no block characters anywhere.
+
+In anything else (Terminal.app, iTerm2, gnome-terminal, …) you get the
+half-block renderers only — fine, but you're watching the trailer, not
+the movie.
+
+```sh
+# macOS                          # Arch
+brew install --cask ghostty      sudo pacman -S ghostty
+```
+
+`ytm --doctor` tells you whether your terminal qualifies.
+
 ## install
 
 On a Mac, one line does everything (Homebrew, deps, clone, launcher,
