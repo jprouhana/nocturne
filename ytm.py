@@ -2525,6 +2525,7 @@ class App:
         # shaders (ghostty starfields etc.) so the plasma and the cover
         # don't dissolve into the wallpaper
         self.shader_guard = int(state.get("shader_guard", 0))
+        self.guard_floor = int(state.get("guard_floor", 108))
         if self.shader_guard:
             self.art.floor = self.SHADER_FLOOR
         self.keep_awake = int(state.get("keep_awake", 1))
@@ -2579,6 +2580,7 @@ class App:
                            "rich_search": self.rich_search,
                            "viz_art": self.viz_art,
                            "shader_guard": self.shader_guard,
+                           "guard_floor": self.guard_floor,
                            "keep_awake": self.keep_awake,
                            "sc_on": self.sc_on,
                            "theme": THEMES[self.theme_i][0]}, f)
@@ -2671,11 +2673,23 @@ class App:
     def _wolf_start(self):
         # the easter egg door: searching "bhop" lands here instead
         # of the API. music keeps playing — the game drinks the groove.
-        # preferred: a dedicated shader-free opaque ghostty window
-        # (ytm --wolf), where the true-black canvas can't be eaten by
-        # luminance-keyed terminal shaders; in-place mode is the fallback.
-        if shutil.which("ghostty") and (os.environ.get("WAYLAND_DISPLAY")
-                                        or os.environ.get("DISPLAY")):
+        # preferred engine: the browser build (true pointer lock — click
+        # captures the mouse, esc releases it — and smooth 60fps canvas).
+        # falls back to the terminal build, then to in-place mode.
+        gui = (os.environ.get("WAYLAND_DISPLAY")
+               or os.environ.get("DISPLAY"))
+        web = os.path.expanduser("~/Projects/blackspace-wolf/index.html")
+        if gui and os.path.exists(web) and shutil.which("firefox"):
+            try:
+                subprocess.Popen(
+                    ["firefox", "--new-window", "file://" + web],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
+                self.say("the blackspace opens a door. click to lock in.")
+                return
+            except Exception:
+                pass
+        if shutil.which("ghostty") and gui:
             try:
                 subprocess.Popen(
                     ["ghostty", "--gtk-single-instance=false",
@@ -3388,7 +3402,7 @@ class App:
                                              else -step)
                 cur = min(hi, max(lo, round(cur, 2)))
                 setattr(self, attr, int(cur) if isinstance(step, int) else cur)
-                if attr == "shader_guard":
+                if attr in ("shader_guard", "guard_floor"):
                     self.art.floor = (self.SHADER_FLOOR
                                       if self.shader_guard else None)
             return
@@ -3833,6 +3847,7 @@ class App:
             ("rich search", "rich_search", 0, 1, 1, ("off", "on")),
             ("art overlay", "viz_art", 0, 1, 1, ("off", "on")),
             ("shader guard", "shader_guard", 0, 2, 1, ("off", "art", "full")),
+            ("guard floor", "guard_floor", 40, 150, 10, ""),
             ("keep awake", "keep_awake", 0, 1, 1, ("off", "on")),
             ("☁ soundcloud", "sc_on", 0, 1, 1, ("off", "on")),
         ]
@@ -3870,13 +3885,18 @@ class App:
                  f"{hint:^{bw - 2}}" + RESET + bord + "│" + RESET,
                  bord + "╰" + "─" * (bw - 2) + "╯" + RESET]
         y0 = max(1, (len(lines) - len(rows)) // 2)
+        # under a wallpaper shader the box's empty cells get keyed out —
+        # give every cell an opaque floored backdrop so the menu stays
+        # one solid panel
+        bgc = bg(self.SHADER_FLOOR) if getattr(self, "shader_guard", 0) \
+            else ""
         for i, rrow in enumerate(rows):
             if y0 + i >= len(lines):
                 break
             cells = ansi_cells(lines[y0 + i], w)
             for j, (sgr, ch) in enumerate(ansi_cells(rrow, bw)):
                 if ch:
-                    put_cell(cells, x0 + j, sgr, ch)
+                    put_cell(cells, x0 + j, bgc + sgr, ch)
             lines[y0 + i] = cells_to_str(cells)
         return lines
 
@@ -3948,13 +3968,15 @@ class App:
                  bord + "╚" + "═" * (bw - 2) + "╝" + RESET]
         x0 = (w - bw) // 2
         y0 = max(4, (len(lines) - len(rows)) // 2)
+        bgc = bg(self.SHADER_FLOOR) if getattr(self, "shader_guard", 0) \
+            else ""
         for i, rrow in enumerate(rows):
             if y0 + i >= len(lines):
                 break
             cells = ansi_cells(lines[y0 + i], w)
             for j, (sgr, ch) in enumerate(ansi_cells(rrow, bw)):
                 if ch:
-                    put_cell(cells, x0 + j, sgr, ch)
+                    put_cell(cells, x0 + j, bgc + sgr, ch)
             lines[y0 + i] = cells_to_str(cells)
         # the box is on fire — tongues lick up off the top border with
         # the heart splash's multi-sine flicker, transparent around the
@@ -4921,7 +4943,8 @@ class App:
         if getattr(self, "shader_guard", 0):
             import numpy as np
             a = np.maximum(a, np.array(self.SHADER_FLOOR, np.uint8))
-        url = (self.now.thumb, bool(getattr(self, "shader_guard", 0)))
+        url = (self.now.thumb,
+               self.SHADER_FLOOR if getattr(self, "shader_guard", 0) else None)
         if getattr(self, "_kitty_art_key", None) != url or not was_live:
             # new track (or the screen was wiped): ship the pixels once
             data = base64.standard_b64encode(
@@ -4943,7 +4966,13 @@ class App:
         self._kitty_art_live = True
         return out
 
-    SHADER_FLOOR = (42, 46, 64)   # clears luminance-keyed shader cutoffs
+    @property
+    def SHADER_FLOOR(self):
+        """The darkest color the guard lets through — tunable, because
+        every wallpaper shader keys at a different cutoff (his new one
+        eats anything under ~42% grey; the old fixed slab vanished)."""
+        v = int(getattr(self, "guard_floor", 108))
+        return (v, v + 4, v + 20)
 
     def _drop_lut(self):
         """64-entry palette: dark → primary → secondary → accent → white.
