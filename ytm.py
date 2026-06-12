@@ -54,6 +54,28 @@ CACHE_DIR = os.path.expanduser("~/.cache/nocturne")
 ART_CACHE_DIR = os.path.join(CACHE_DIR, "art")
 
 
+def shader_active():
+    """True when the host ghostty runs a post-process shader (starfield
+    wallpapers etc.) — dark pixels don't survive those, so nocturne
+    forces its black environment automatically. No setting, no knob."""
+    if "ghostty" not in (os.environ.get("TERM", "")
+                         + os.environ.get("TERM_PROGRAM", "")).lower():
+        return False
+    cfg = os.path.join(os.environ.get("XDG_CONFIG_HOME",
+                                      os.path.expanduser("~/.config")),
+                       "ghostty", "config")
+    try:
+        with open(cfg) as f:
+            for ln in f:
+                ln = ln.strip()
+                if ln.startswith("custom-shader") and "=" in ln:
+                    if ln.split("=", 1)[1].strip().strip('"'):
+                        return True
+    except OSError:
+        pass
+    return False
+
+
 def cache_load(name, max_age=7 * 86400):
     """Stale-while-revalidate: yesterday's library beats a blank tab."""
     try:
@@ -2438,6 +2460,84 @@ def wolf_main():
     return 0
 
 
+def wolf_pulse_main():
+    """Hidden: ytm --pulse — localhost groove feed for the browser game.
+
+    Serves the drop visualizer's drive signals as JSON on
+    127.0.0.1:8763 with CORS * (file:// pages can read it). Taps the
+    system monitor, so it hears whatever is playing. Auto-exits when
+    nobody has polled for ~90 s, or instantly if the port is taken
+    (someone is already serving the groove)."""
+    import http.server
+    state = {"pulse": 0.0, "energy": 0.0, "bass": 0.0, "mid": 0.0,
+             "treble": 0.0, "live": False}
+    last_req = [time.time()]
+    shim = type("WolfAudio", (), {})()
+    shim.tap = SpectrumTap()
+    shim._drop_e = [0.0, 0.0, 0.0]
+    shim._drop_bass_avg = 0.12
+    shim._drop_groove = App._drop_groove.__get__(shim)
+
+    def pump():
+        last = time.perf_counter()
+        while time.time() - last_req[0] < 90:
+            now = time.perf_counter()
+            dt = min(0.25, now - last)
+            last = now
+            try:
+                if shim.tap.producing:
+                    lv = shim.tap.levels(18)
+                    raw = (sum(lv[:5]) / 5, sum(lv[5:12]) / 7,
+                           sum(lv[12:]) / 6)
+                else:
+                    raw = (0.0, 0.0, 0.0)
+                for i, v in enumerate(raw):
+                    e = shim._drop_e[i]
+                    k = min(1.0, (10.0 if v > e else 2.4) * dt)
+                    shim._drop_e[i] = e + (v - e) * k
+                pulse, en, eb, em, et = shim._drop_groove(
+                    raw, dt, time.time())
+                state.update(pulse=round(min(1.2, pulse), 4),
+                             energy=round(en, 4),
+                             bass=round(min(1.2, eb), 4),
+                             mid=round(min(1.2, em), 4),
+                             treble=round(min(1.2, et), 4),
+                             live=bool(shim.tap.producing))
+            except Exception:
+                pass
+            time.sleep(0.033)
+        try:
+            shim.tap.stop()
+        except Exception:
+            pass
+        os._exit(0)
+
+    class Feed(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            last_req[0] = time.time()
+            body = json.dumps(state).encode()
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    try:
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 8763), Feed)
+    except OSError:
+        return 0
+    threading.Thread(target=pump, daemon=True).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 class App:
     def __init__(self, ao=None):
         from ytmusicapi import YTMusic
@@ -2524,8 +2624,10 @@ class App:
         # lifts the visualizer's blacks above luminance-keyed terminal
         # shaders (ghostty starfields etc.) so the plasma and the cover
         # don't dissolve into the wallpaper
-        self.shader_guard = int(state.get("shader_guard", 0))
-        self.guard_floor = int(state.get("guard_floor", 108))
+        # forced black environment when a wallpaper shader is detected —
+        # not a setting (he tried settings; they were ugly)
+        self.shader_guard = 2 if shader_active() else 0
+        self.guard_floor = 108
         if self.shader_guard:
             self.art.floor = self.SHADER_FLOOR
         self.keep_awake = int(state.get("keep_awake", 1))
@@ -2579,8 +2681,6 @@ class App:
                            "viz_morph": self.viz_morph,
                            "rich_search": self.rich_search,
                            "viz_art": self.viz_art,
-                           "shader_guard": self.shader_guard,
-                           "guard_floor": self.guard_floor,
                            "keep_awake": self.keep_awake,
                            "sc_on": self.sc_on,
                            "theme": THEMES[self.theme_i][0]}, f)
@@ -2681,6 +2781,10 @@ class App:
         web = os.path.expanduser("~/Projects/blackspace-wolf/index.html")
         if gui and os.path.exists(web) and shutil.which("firefox"):
             try:
+                subprocess.Popen(
+                    [sys.executable, os.path.abspath(__file__), "--pulse"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
                 subprocess.Popen(
                     ["firefox", "--new-window", "file://" + web],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -3402,9 +3506,6 @@ class App:
                                              else -step)
                 cur = min(hi, max(lo, round(cur, 2)))
                 setattr(self, attr, int(cur) if isinstance(step, int) else cur)
-                if attr in ("shader_guard", "guard_floor"):
-                    self.art.floor = (self.SHADER_FLOOR
-                                      if self.shader_guard else None)
             return
 
         if self.help:
@@ -3846,8 +3947,6 @@ class App:
              ("chunky", "hi-def", "pixel")),
             ("rich search", "rich_search", 0, 1, 1, ("off", "on")),
             ("art overlay", "viz_art", 0, 1, 1, ("off", "on")),
-            ("shader guard", "shader_guard", 0, 2, 1, ("off", "art", "full")),
-            ("guard floor", "guard_floor", 40, 150, 10, ""),
             ("keep awake", "keep_awake", 0, 1, 1, ("off", "on")),
             ("☁ soundcloud", "sc_on", 0, 1, 1, ("off", "on")),
         ]
@@ -6032,6 +6131,7 @@ def main():
                     help="wrap --eww frames in an ascii box with this title")
     ap.add_argument("--ao", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--wolf", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--pulse", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.version:
@@ -6039,6 +6139,8 @@ def main():
         sys.exit(0)
     if args.wolf:
         sys.exit(wolf_main())
+    if args.pulse:
+        sys.exit(wolf_pulse_main())
     if args.cmd == "setup" or args.setup:
         sys.exit(0 if setup_wizard() else 1)
     if args.cmd == "update":
