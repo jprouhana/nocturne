@@ -57,7 +57,11 @@ ART_CACHE_DIR = os.path.join(CACHE_DIR, "art")
 def shader_active():
     """True when the host ghostty runs a post-process shader (starfield
     wallpapers etc.) — dark pixels don't survive those, so nocturne
-    forces its black environment automatically. No setting, no knob."""
+    forces its black environment automatically. No setting, no knob.
+    Inside nocturne's own clean window the shader is overridden, so
+    this answers False there (true blacks come back)."""
+    if os.environ.get("NOCTURNE_PURE") == "1":
+        return False
     if "ghostty" not in (os.environ.get("TERM", "")
                          + os.environ.get("TERM_PROGRAM", "")).lower():
         return False
@@ -5942,6 +5946,38 @@ def self_update():
     return True
 
 
+def respawn_pure():
+    """Launched inside a shader-rigged ghostty? Open nocturne in its own
+    clean window — shader cleared, opaque true-black background, the
+    rest of the user's config untouched — and give this shell its
+    prompt back. NOTHING is killed: the new window is an independent
+    process and every existing terminal stays exactly as it was."""
+    if os.environ.get("NOCTURNE_PURE") == "1":
+        return False                      # already in the clean window
+    if not shader_active() or not shutil.which("ghostty"):
+        return False
+    if not (os.environ.get("WAYLAND_DISPLAY")
+            or os.environ.get("DISPLAY")):
+        return False
+    if not sys.stdout.isatty():
+        return False
+    try:
+        subprocess.Popen(
+            ["ghostty", "--gtk-single-instance=false",
+             "--custom-shader=",
+             "--background=#0a0a10", "--background-opacity=1",
+             "--background-blur=0", "--title=NOCTURNE",
+             "-e", sys.executable, os.path.abspath(__file__)],
+            env=dict(os.environ, NOCTURNE_PURE="1"),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+    except Exception:
+        return False
+    print("☾ nocturne opens its own window — no shader, true black.")
+    print("  (NOCTURNE_PURE=1 nocturne runs it right here instead)")
+    return True
+
+
 def rename_notice():
     """One-time, for everyone arriving from the YT MUSIC era: the new
     name announced in their own terminal, in the house gradient."""
@@ -6173,6 +6209,8 @@ def main():
         print("  to get your library/likes/playlists:  ytm --login")
         print("  starting in guest mode in 3s…")
         time.sleep(3)
+    if respawn_pure():
+        sys.exit(0)
     rename_notice()
     App(ao=args.ao).run()
 
