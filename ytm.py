@@ -1412,40 +1412,62 @@ LOGO = [
     "█▚ █ ▐▌ ▐▌ ▐▌     █   █  █ █▄▄▛ █▚ █ █▀▀ ",
     "█ ▚█ ▝█▄█▘ ▝█▄▄   █   ▜▄▄▛ █ ▝▙ █ ▚█ █▄▄▄",
 ]
-# the sign: figlet's "lean" — dotted italic strokes, airy like starlight
-BIG_LOGO = [
-    "    _/      _/    _/_/      _/_/_/  _/_/_/_/_/  _/    _/  _/_/_/    _/      _/  _/_/_/_/",
-    "   _/_/    _/  _/    _/  _/            _/      _/    _/  _/    _/  _/_/    _/  _/",
-    "  _/  _/  _/  _/    _/  _/            _/      _/    _/  _/_/_/    _/  _/  _/  _/_/_/",
-    " _/    _/_/  _/    _/  _/            _/      _/    _/  _/    _/  _/    _/_/  _/",
-    "_/      _/    _/_/      _/_/_/      _/        _/_/    _/    _/  _/      _/  _/_/_/_/",
+# the sign: NOCTURNE set in JetBrains Mono Bold Italic, rasterized
+# to half-block pixels — solid letterforms that stay legible over
+# any wallpaper/shader, unlike line-art figlet strokes
+BIG_BITS = [
+    "  ##    #      ####        ###     ########    ##   ##    #####      ###   #     #######",
+    "  ###   #     ######     ######    ########    #    ##    #######    ###   #     #######",
+    "  ###   #    ##   ##     ##  ##       ##       #    ##    ##   ##    ###   #     #",
+    "  ###  ##    ##   ##    ##    #       ##       #    ##    #    ##    ###   #    ##",
+    "  # #  ##    #    ##    ##            ##      ##    ##    #    ##    # #  ##    ##",
+    " ## #  ##    #    ##    ##            #       ##    #     #    ##    # #  ##    ##",
+    " ## #  ##   ##    ##    #             #       ##    #    ### ###    ## ## ##    ######",
+    " ## ## #    ##    ##    #             #       ##   ##    ######     ## ## ##    ######",
+    " ## ## #    ##    #    ##            ##       #    ##    ##  ##     ##  # #     #",
+    " #   # #    ##    #    ##            ##       #    ##    ##  ##     ##  # #     #",
+    " #   ###    ##   ##    ##    #       ##       #    ##    #   ##     #   ###    ##",
+    " #   ###    ##   ##    ##   ##       ##       ##  ##     #    #     #   ###    ##",
+    "##   ###    ######      ######       ##       ######     #    ##    #   ###    #######",
+    "##   ##      ####        ###         #         ###      ##    ##    #    ##    #######",
 ]
 _LOGO_CACHE = {}
 
 
 def fancy_logo():
-    """The NOCTURNE sign: lean italic strokes lit by a diagonal
-    gradient — the upstrokes catch a little extra light, like
-    starlight on glass. Rebuilt per theme, cached after."""
+    """The NOCTURNE wordmark: a real italic typeface as half-block
+    pixels — diagonal gradient, a lit bevel along each letter's top
+    edge. Rebuilt per theme, cached after."""
     key = (RED, ORANGE, PINK)
     if key in _LOGO_CACHE:
         return _LOGO_CACHE[key]
-    H = len(BIG_LOGO)
-    Wc = max(len(r) for r in BIG_LOGO)
+    H2 = len(BIG_BITS)
+    Wc = max(len(r) for r in BIG_BITS)
+    g = [[1 if x < len(r) and r[x] == "#" else 0 for x in range(Wc)]
+         for r in BIG_BITS]
     out = []
-    for r, row in enumerate(BIG_LOGO):
+    for r in range(H2 // 2):
         seg = []
-        for x, ch in enumerate(row):
-            if ch == " ":
+        for x in range(Wc):
+            t, b = g[2 * r][x], g[2 * r + 1][x]
+            if not t and not b:
                 seg.append(" ")
                 continue
-            gy = r / max(H - 1, 1)
-            c = lerp(lerp(RED, PINK, gy), lerp(ORANGE, RED, gy),
-                     x / max(Wc - 1, 1))
-            if ch == "/":
-                c = lerp(c, WHITE, 0.25)
-            seg.append(fg(c) + ch)
-        out.append("".join(seg) + RESET)
+            gx = x / (Wc - 1)
+
+            def col(y, lit):
+                c = lerp(lerp(RED, PINK, y / (H2 - 1)),
+                         lerp(ORANGE, RED, y / (H2 - 1)), gx)
+                return lerp(c, WHITE, 0.40) if lit else c
+            lit_t = t and (r == 0 or not g[2 * r - 1][x])
+            if t and b:
+                seg.append(fg(col(2 * r, lit_t)) + bg(col(2 * r + 1, False))
+                           + "▀" + RESET)
+            elif t:
+                seg.append(fg(col(2 * r, lit_t)) + "▀" + RESET)
+            else:
+                seg.append(fg(col(2 * r + 1, False)) + "▄" + RESET)
+        out.append("".join(seg))
     _LOGO_CACHE.clear()           # one theme at a time is plenty
     _LOGO_CACHE[key] = out
     return out
@@ -1530,6 +1552,7 @@ class Blackspace:
         self.mturn = 0.0         # mouse: virtual-stick turn rate
         self.pulse = self.pulse_s = self.heat = 0.0
         self.recoil = 0.0
+        self.shocks = []         # landing shockwaves rippling the floor
         self.bob_t = self.bob_amt = 0.0
         self.score = 0
         self.hearts = []         # pickups floating over the track
@@ -1737,6 +1760,8 @@ class Blackspace:
         if self.grounded and self._held("jump"):
             if self.ground_t <= 0.10 and self.airtime > 0.15:
                 self.chain += 1
+                self.shocks = (self.shocks
+                               + [[self.px, self.py, 0.0]])[-4:]
                 boost = 1.05 + 0.02 * min(6, self.chain)
                 s2 = min(11.5, speed * boost)
                 if speed > 0.5:
@@ -1783,12 +1808,18 @@ class Blackspace:
                 # short gaps without jumping at all.)
                 if self.z > -0.25 and self._floor(self.px, self.py):
                     land = -self.vz
+                    self.shocks = (self.shocks
+                                   + [[self.px, self.py, 0.0]])[-4:]
                     self.z = self.vz = 0.0
                     self.grounded = True
                     self.ground_t = 0.0
                     self.recoil = min(1.5, 0.2 + land * 0.1)
                 elif self.z < -2.5:
                     self._die()
+
+        for s in self.shocks:
+            s[2] += dt
+        self.shocks = [s for s in self.shocks if s[2] < 1.1]
 
         # speed is energy — the world wakes up when you fly
         sp = math.hypot(self.vx, self.vy)
@@ -2018,6 +2049,9 @@ class Blackspace:
             c = self.cells.get(xx)
             if c:
                 loA[xx - x0w], hiA[xx - x0w], gpA[xx - x0w] = c
+        # which cells border a gap — the void announces itself
+        nx_gap = np.concatenate([gpA[1:], [True]])
+        pv_gap = np.concatenate([[True], gpA[:-1]])
 
         # floor: twin orbiting ripple sources; gap cells fall to void
         if eyez > 0.05:
@@ -2043,6 +2077,18 @@ class Blackspace:
                 raw = (P["a1"] * af * np.sin(d1 * P["k1"] - 1.15 * t)
                        + P["a2"] * af * np.sin(d2 * P["k2"] + 0.85 * t)
                        + P["bias"])
+                # every landing slams a ring of light into the floor
+                for sx_, sy_, age in self.shocks:
+                    ds = np.sqrt((fx - sx_) ** 2 + (fy - sy_) ** 2)
+                    ring = ds - (0.6 + 5.5 * age)
+                    raw += (2.2 * (1.0 - age / 1.1)
+                            * np.exp(-ring * ring * 3.2))
+                # gap edges glow hot before the drop
+                xig = np.clip(fx.astype(np.int32) - x0w, 0, n - 1)
+                frac = fx - np.floor(fx)
+                throb = 0.7 + 0.3 * math.sin(self.tt * 3.1)
+                raw += 2.4 * throb * (nx_gap[xig] * frac ** 3
+                                      + pv_gap[xig] * (1.0 - frac) ** 3)
                 vn = np.clip(0.5 + raw / 5.5, 0.0, 1.0)
                 fogf = bright / (1 + 0.06 * rowd * rowd)
                 fi = np.clip(vn * 63 * fogf[:, None], 0, 63).astype(np.int16)
@@ -2534,7 +2580,8 @@ class App:
                                         or os.environ.get("DISPLAY")):
             try:
                 subprocess.Popen(
-                    ["ghostty", "--custom-shader=",
+                    ["ghostty", "--gtk-single-instance=false",
+                     "--custom-shader=",
                      "--background=#050507", "--background-opacity=1",
                      "--background-blur=0", "--title=the blackspace",
                      "-e", sys.executable, os.path.abspath(__file__),
@@ -3452,7 +3499,7 @@ class App:
         tab_bar = (fg(DGREY) + "·" + RESET).join(tabs)
 
         lines = []
-        big = w >= len(BIG_LOGO[0]) + 6 and self.size.lines >= 26
+        big = w >= max(len(r) for r in BIG_BITS) + 6 and self.size.lines >= 26
         if big:
             for r, row in enumerate(fancy_logo()):
                 ln = "  " + row
