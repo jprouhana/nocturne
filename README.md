@@ -1,6 +1,5 @@
 # NOCTURNE
 
-*(the command is still `ytm`)*
 
 Night music in the terminal — YouTube Music and SoundCloud in one
 player. mpv handles playback, [ytmusicapi](https://github.com/sigma67/ytmusicapi)
