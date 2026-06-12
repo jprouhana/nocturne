@@ -9,6 +9,9 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 FONT = "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf"
+# the mono font misses a few of the app's signature glyphs — borrow them
+SYMBOL_FONT = "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf"
+SYMBOL_CHARS = set("\u2601\u2665\u2661\u2726\u2727\u21b5")  # ☁ ♥ ♡ ✦ ✧ ↵
 FS = 22
 CW, CH = 13, 26          # cell metrics tuned to the font at FS
 PAD = 24
@@ -94,6 +97,10 @@ def render(frame, cols, rows):
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
     font = ImageFont.truetype(FONT, FS)
+    try:
+        symfont = ImageFont.truetype(SYMBOL_FONT, FS)
+    except OSError:
+        symfont = font
     for r in range(rows):
         for c in range(cols):
             ch, fg, bg = grid[r][c]
@@ -101,7 +108,9 @@ def render(frame, cols, rows):
             if bg:
                 d.rectangle([x, y, x + CW, y + CH], fill=bg)
             if ch != " ":
-                d.text((x, y - 2), ch, font=font, fill=fg)
+                d.text((x, y - 2), ch,
+                       font=symfont if ch in SYMBOL_CHARS else font,
+                       fill=fg)
     return img
 
 

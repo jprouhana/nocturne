@@ -1412,74 +1412,40 @@ LOGO = [
     "█▚ █ ▐▌ ▐▌ ▐▌     █   █  █ █▄▄▛ █▚ █ █▀▀ ",
     "█ ▚█ ▝█▄█▘ ▝█▄▄   █   ▜▄▄▛ █ ▝▙ █ ▚█ █▄▄▄",
 ]
-_GLYPHS = {
-    "Y": ["██╗   ██╗", "╚██╗ ██╔╝", " ╚████╔╝ ",
-          "  ╚██╔╝  ", "   ██║   ", "   ╚═╝   "],
-    "T": ["████████╗", "╚══██╔══╝", "   ██║   ",
-          "   ██║   ", "   ██║   ", "   ╚═╝   "],
-    "M": ["███╗   ███╗", "████╗ ████║", "██╔████╔██║",
-          "██║╚██╔╝██║", "██║ ╚═╝ ██║", "╚═╝     ╚═╝"],
-    "U": ["██╗   ██╗", "██║   ██║", "██║   ██║",
-          "██║   ██║", "╚██████╔╝", " ╚═════╝ "],
-    "S": ["███████╗", "██╔════╝", "███████╗",
-          "╚════██║", "███████║", "╚══════╝"],
-    "I": ["██╗", "██║", "██║", "██║", "██║", "╚═╝"],
-    "C": [" ██████╗", "██╔════╝", "██║     ",
-          "██║     ", "╚██████╗", " ╚═════╝"],
-    "N": ["███╗   ██╗", "████╗  ██║", "██╔██╗ ██║",
-          "██║╚██╗██║", "██║ ╚████║", "╚═╝  ╚═══╝"],
-    "O": [" ██████╗ ", "██╔═══██╗", "██║   ██║",
-          "██║   ██║", "╚██████╔╝", " ╚═════╝ "],
-    "R": ["██████╗ ", "██╔══██╗", "██████╔╝",
-          "██╔══██╗", "██║  ██║", "╚═╝  ╚═╝"],
-    "E": ["███████╗", "██╔════╝", "█████╗  ",
-          "██╔══╝  ", "███████╗", "╚══════╝"],
-    " ": ["  "] * 6,
-}
-BIG_LOGO = [" ".join(_GLYPHS[ch][r] for ch in APP_NAME) for r in range(6)]
-_SHADOW_CHARS = set("╔╗╚╝═║")
+# the sign: figlet's "lean" — dotted italic strokes, airy like starlight
+BIG_LOGO = [
+    "    _/      _/    _/_/      _/_/_/  _/_/_/_/_/  _/    _/  _/_/_/    _/      _/  _/_/_/_/",
+    "   _/_/    _/  _/    _/  _/            _/      _/    _/  _/    _/  _/_/    _/  _/",
+    "  _/  _/  _/  _/    _/  _/            _/      _/    _/  _/_/_/    _/  _/  _/  _/_/_/",
+    " _/    _/_/  _/    _/  _/            _/      _/    _/  _/    _/  _/    _/_/  _/",
+    "_/      _/    _/_/      _/_/_/      _/        _/_/    _/    _/  _/      _/  _/_/_/_/",
+]
 _LOGO_CACHE = {}
 
 
 def fancy_logo():
-    """The NOCTURNE sign at half-block resolution: every cell splits
-    into two pixels, so the gradient runs 12 steps instead of 6, the
-    top edge of each letter catches a bevel highlight, and the
-    ANSI-shadow strokes render as dim tinted pixels instead of bare
-    box-drawing. Rebuilt per theme, cached after."""
+    """The NOCTURNE sign: lean italic strokes lit by a diagonal
+    gradient — the upstrokes catch a little extra light, like
+    starlight on glass. Rebuilt per theme, cached after."""
     key = (RED, ORANGE, PINK)
     if key in _LOGO_CACHE:
         return _LOGO_CACHE[key]
     H = len(BIG_LOGO)
     Wc = max(len(r) for r in BIG_LOGO)
-    rows = [r.ljust(Wc) for r in BIG_LOGO]
-
-    def cls(r, x):
-        ch = rows[r][x]
-        return 2 if ch == "█" else (1 if ch in _SHADOW_CHARS else 0)
-
     out = []
-    for r in range(H):
+    for r, row in enumerate(BIG_LOGO):
         seg = []
-        for x in range(Wc):
-            c = cls(r, x)
-            if not c:
+        for x, ch in enumerate(row):
+            if ch == " ":
                 seg.append(" ")
                 continue
-            gx = x / max(Wc - 1, 1)
-
-            def col(y, lit):
-                base = lerp(lerp(RED, PINK, y / (2 * H - 1)),
-                            lerp(ORANGE, RED, y / (2 * H - 1)), gx)
-                if c == 1:
-                    base = lerp(base, DARK, 0.66)
-                if lit:
-                    base = lerp(base, WHITE, 0.42)
-                return base
-            bevel = c == 2 and (r == 0 or cls(r - 1, x) != 2)
-            seg.append(fg(col(2 * r, bevel)) + bg(col(2 * r + 1, False))
-                       + "▀" + RESET)
-        out.append("".join(seg))
+            gy = r / max(H - 1, 1)
+            c = lerp(lerp(RED, PINK, gy), lerp(ORANGE, RED, gy),
+                     x / max(Wc - 1, 1))
+            if ch == "/":
+                c = lerp(c, WHITE, 0.25)
+            seg.append(fg(c) + ch)
+        out.append("".join(seg) + RESET)
     _LOGO_CACHE.clear()           # one theme at a time is plenty
     _LOGO_CACHE[key] = out
     return out
@@ -1504,7 +1470,7 @@ QUADS = " ▗▖▄▝▐▞▟▘▚▌▙▀▜▛█"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# blackspace — the hidden floor (type "wolfenstein" in the search bar)
+# blackspace — the hidden floor (type "bhop" in the search bar)
 # ──────────────────────────────────────────────────────────────────────────────
 
 WOLF_BEST = os.path.join(CONFIG_DIR, "wolf.json")
@@ -1513,7 +1479,7 @@ WOLF_BEST = os.path.join(CONFIG_DIR, "wolf.json")
 class Blackspace:
     """A bhop parkour runner wearing the drop visualizer's skin.
 
-    Easter egg, on purpose: typing "wolfenstein" into the search bar
+    Easter egg, on purpose: typing "bhop" into the search bar
     drops you in (nothing in the help screen mentions it). An endless
     corridor over the void — the floor develops gaps, chained hops
     build speed, and the like-splash heart rides at the bottom of the
@@ -1558,7 +1524,10 @@ class Blackspace:
         self.dead = False
         self.death_t = 0.0
         self.held = {}
-        self.tt = 0.0
+        self.tt = 0.0            # floor time — rides the bass
+        self.wtt = 0.0           # wall time — rides the mids
+        self.pitch = 0.0         # mouse: vertical look
+        self.mturn = 0.0         # mouse: virtual-stick turn rate
         self.pulse = self.pulse_s = self.heat = 0.0
         self.recoil = 0.0
         self.bob_t = self.bob_amt = 0.0
@@ -1572,8 +1541,8 @@ class Blackspace:
         self._cam = (1.0, 0.0, 0.0, 0.66)
         self.last = time.perf_counter()
         self._gen(44)
-        self._say("the void hums below. run — space to hop, chain hops "
-                  "to fly.")
+        self._say("the void hums below. aim with the mouse — hold "
+                  "space (or the button) to bhop.")
 
     # ── tiny helpers ─────────────────────────────────────────────────────
     def _say(self, t, dur=4.5):
@@ -1656,6 +1625,16 @@ class Blackspace:
         elif k in ("r", "R"):
             self._reset()                        # instant run restart
 
+    def mouse(self, fx, fy, pressed):
+        # terminal mouse = a virtual stick: horizontal offset from center
+        # sets the turn rate (edge = full lock), height sets the pitch.
+        # no pointer lock in a tty — rate-steering is the honest version.
+        dx = (fx - 0.5) * 2.0
+        self.mturn = 0.0 if abs(dx) < 0.08 else dx
+        self.pitch = (0.5 - fy) * 1.5
+        if pressed:
+            self.held["jump"] = time.time() + 0.22
+
     def _held(self, k):
         return self.held.get(k, 0.0) > time.time()
 
@@ -1700,16 +1679,22 @@ class Blackspace:
             self.death_t += dt
             return
 
-        # turning — in the air with the matching strafe held, the
-        # velocity vector turns too (that's the whole sport)
+        # turning — arrows or the mouse stick; in the air with the
+        # matching strafe held, the velocity vector turns too (that's
+        # the whole sport)
+        turn = 0.0
         if self._held("LEFT"):
-            self.ang -= 2.9 * dt
-            if not self.grounded and self._held("a"):
-                self._airturn(-2.2 * dt)
+            turn -= 2.9
         if self._held("RIGHT"):
-            self.ang += 2.9 * dt
-            if not self.grounded and self._held("d"):
-                self._airturn(2.2 * dt)
+            turn += 2.9
+        turn += self.mturn * abs(self.mturn) * 3.8   # quadratic ease
+        if turn:
+            self.ang += turn * dt
+            if not self.grounded:
+                if turn < 0 and self._held("a"):
+                    self._airturn(turn * 0.76 * dt)
+                elif turn > 0 and self._held("d"):
+                    self._airturn(turn * 0.76 * dt)
 
         ca, sa = math.cos(self.ang), math.sin(self.ang)
         wx = wy = 0.0
@@ -1851,17 +1836,31 @@ class Blackspace:
         if self.lut is not None:
             return
         dark = (8, 8, 14) if self.deep else (40, 44, 62)
-        stops = [dark, lerp(dark, RED, 0.45), RED,
-                 ORANGE, PINK, lerp(PINK, WHITE, 0.55)]
         pos = [0.0, 0.34, 0.60, 0.80, 0.94, 1.0]
-        lut = []
-        for i in range(64):
-            v = i / 63
-            v = min(1.0, max(0.0, (v - 0.5) * 1.25 + 0.5)) ** 1.2
-            v = 0.5 - 0.5 * math.cos(v * math.pi)
-            a = max(j for j in range(len(pos) - 1) if pos[j] <= v)
-            f = (v - pos[a]) / (pos[a + 1] - pos[a])
-            lut.append(lerp(stops[a], stops[a + 1], f))
+
+        def ramp(stops):
+            out = []
+            for i in range(64):
+                v = i / 63
+                v = min(1.0, max(0.0, (v - 0.5) * 1.25 + 0.5)) ** 1.2
+                v = 0.5 - 0.5 * math.cos(v * math.pi)
+                a = max(j for j in range(len(pos) - 1) if pos[j] <= v)
+                f = (v - pos[a]) / (pos[a + 1] - pos[a])
+                out.append(lerp(stops[a], stops[a + 1], f))
+            return out
+
+        # four canvases: the floor wears the theme; each wall family gets
+        # its own hue so surfaces read against the pure-black void
+        violet = (122, 62, 255)
+        teal = (0, 205, 185)
+        lut = ramp([dark, lerp(dark, RED, 0.45), RED,
+                    ORANGE, PINK, lerp(PINK, WHITE, 0.55)])          # floor
+        lut += ramp([dark, lerp(dark, RED, 0.5), RED, ORANGE,
+                     lerp(ORANGE, WHITE, 0.3), lerp(ORANGE, WHITE, 0.6)])
+        lut += ramp([dark, lerp(dark, violet, 0.5), violet, PINK,
+                     lerp(PINK, WHITE, 0.3), lerp(PINK, WHITE, 0.6)])
+        lut += ramp([dark, lerp(dark, teal, 0.5), teal, (140, 255, 230),
+                     lerp(teal, WHITE, 0.5), lerp(teal, WHITE, 0.75)])
         self.lut = lut
         self._fgs = [f"\x1b[38;2;{c[0]};{c[1]};{c[2]}m" for c in lut]
         self._bgs = [f"\x1b[48;2;{c[0]};{c[1]};{c[2]}m" for c in lut]
@@ -1938,7 +1937,7 @@ class Blackspace:
 
         # drink the same groove signals as the drop viz — the world
         # surges on the music's kicks on top of the gameplay pulses
-        mpulse = en = tre = 0.0
+        mpulse = en = tre = eb = em = 0.0
         if app is not None:
             try:
                 if (bool(app.player.props.get("pause"))
@@ -1954,7 +1953,8 @@ class Blackspace:
                     e = app._drop_e[i]
                     kk = min(1.0, (10.0 if v > e else 2.4) * dt)
                     app._drop_e[i] = e + (v - e) * kk
-                mpulse, en, _, _, _ = app._drop_groove(raw, dt, time.time())
+                mpulse, en, eb, em, _ = app._drop_groove(
+                    raw, dt, time.time())
                 tre = getattr(app, "_tre_pulse", 0.0)
             except Exception:
                 pass
@@ -1965,7 +1965,11 @@ class Blackspace:
         self.pulse_s += (p - self.pulse_s) * min(1.0, dt * 16)
         self.heat = min(1.0, self.heat * math.exp(-dt * 0.45))
         energy = min(1.0, 0.15 + max(self.heat, en * 0.8))
-        self.tt += dt * (0.55 + 1.1 * energy + 1.6 * self.pulse_s)
+        # multiband canvas: the floor breathes with the bass, the walls
+        # flow with the mids — two clocks, one song
+        self.tt += dt * (0.55 + 1.1 * energy + 1.6 * self.pulse_s
+                         + 1.2 * min(1.0, eb))
+        self.wtt += dt * (0.6 + 2.2 * min(1.0, em) + 0.8 * self.pulse_s)
         self._update(dt)
 
         W, rows = w, h - 1
@@ -1978,7 +1982,7 @@ class Blackspace:
             c = (int(c[0]), int(c[1]), int(c[2]))
             i = emap.get(c)
             if i is None:
-                i = 64 + len(extras)
+                i = 256 + len(extras)
                 emap[c] = i
                 extras.append(c)
             return i
@@ -1991,7 +1995,8 @@ class Blackspace:
         dirx, diry = math.cos(self.ang), math.sin(self.ang)
         plx, ply = -diry * plane, dirx * plane
         self._cam = (dirx, diry, plx, ply)
-        horizon = int(H / 2 + math.sin(self.bob_t) * 2.2 * self.bob_amt
+        horizon = int(H / 2 + self.pitch * H * 0.5
+                      + math.sin(self.bob_t) * 2.2 * self.bob_amt
                       - self.recoil * 4)
         horizon = min(H - 10, max(8, horizon))
         bright = 1.0 + 0.30 * self.pulse_s + 0.14 * tre
@@ -2034,8 +2039,9 @@ class Blackspace:
                                                 * xs[None, :])
                 d1 = np.sqrt((fx - s1x) ** 2 + (fy - s1y) ** 2)
                 d2 = np.sqrt((fx - s2x) ** 2 + (fy - s2y) ** 2)
-                raw = (P["a1"] * np.sin(d1 * P["k1"] - 1.15 * t)
-                       + P["a2"] * np.sin(d2 * P["k2"] + 0.85 * t)
+                af = 1.0 + 0.4 * min(1.0, eb) + 0.25 * self.pulse_s
+                raw = (P["a1"] * af * np.sin(d1 * P["k1"] - 1.15 * t)
+                       + P["a2"] * af * np.sin(d2 * P["k2"] + 0.85 * t)
                        + P["bias"])
                 vn = np.clip(0.5 + raw / 5.5, 0.0, 1.0)
                 fogf = bright / (1 + 0.06 * rowd * rowd)
@@ -2093,14 +2099,17 @@ class Blackspace:
                * np.where(sides == 1, 0.82, 1.0))
         rawW = np.zeros((H, W), np.float32)
         UU = np.broadcast_to(uarr[None, :], (H, W))
-        t = self.tt
+        base = np.zeros(W, np.int16)
         for wt_ in (1, 2, 3):
             m = wmask & (wts[None, :] == wt_)
             if m.any():
-                rawW[m] = self._wall_raw(wt_, UU[m], vy[m], t)
+                rawW[m] = self._wall_raw(wt_, UU[m], vy[m], self.wtt)
+            base[wts == wt_] = wt_ * 64
         vnW = np.clip(0.5 + rawW / 5.5, 0.0, 1.0)
         wi = np.clip(vnW * 63 * np.broadcast_to(fog[None, :], (H, W)),
                      0, 63).astype(np.int16)
+        # walls keep a dim tint even at full fog — only the void is void
+        wi = np.maximum(wi, 7) + base[None, :]
         idx[wmask] = wi[wmask]
 
         # pickup hearts, far to near, occluded per column by the zbuffer
@@ -2194,25 +2203,54 @@ def wolf_main():
         attrs = termios.tcgetattr(fd)
         attrs[1] |= termios.OPOST | termios.ONLCR
         termios.tcsetattr(fd, termios.TCSANOW, attrs)
-        running, cost, lastsz = True, 0.0, (0, 0)
+        # any-motion mouse tracking, SGR encoded — the aim hand
+        sys.stdout.write("\x1b[?1003h\x1b[?1006h")
+        sys.stdout.flush()
+        mouse_re = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
+        running, cost, lastsz = True, 0.0, (1, 1)
+        ibuf = b""
         while running:
             r, _, _ = select.select([sys.stdin], [], [],
                                     max(0.002, 0.012 - cost))
-            drained = 0
-            while r and drained < 64:
-                ch = os.read(fd, 1).decode(errors="ignore")
-                if ch == "\x1b":
-                    r2, _, _ = select.select([sys.stdin], [], [], 0.01)
-                    seq = (os.read(fd, 2).decode(errors="ignore")
-                           if r2 else "")
-                    ch = {"[A": "UP", "[B": "DOWN", "[C": "RIGHT",
-                          "[D": "LEFT"}.get(seq, "ESC")
-                if ch in ("ESC", "q", "\x03"):
+            if r:
+                try:
+                    ibuf += os.read(fd, 2048)
+                except OSError:
+                    break
+            while ibuf and running:
+                if ibuf[0:1] == b"\x1b":
+                    m = mouse_re.match(ibuf)
+                    if m:
+                        bt, cx, cy = (int(m.group(1)), int(m.group(2)),
+                                      int(m.group(3)))
+                        if bt < 64:    # clicks + moves; wheel ignored
+                            game.mouse(
+                                (cx - 1) / max(1, lastsz[0] - 1),
+                                (cy - 1) / max(1, lastsz[1] - 1),
+                                m.group(4) == b"M" and (bt & 0x43) == 0)
+                        ibuf = ibuf[m.end():]
+                        continue
+                    seq = ibuf[1:3].decode("ascii", "ignore")
+                    code = {"[A": "UP", "[B": "DOWN", "[C": "RIGHT",
+                            "[D": "LEFT"}.get(seq)
+                    if code:
+                        game.key(code)
+                        ibuf = ibuf[3:]
+                        continue
+                    if len(ibuf) < 4:
+                        r2, _, _ = select.select([sys.stdin], [], [], 0.01)
+                        if r2:
+                            break          # partial sequence — wait for it
+                        running = False    # a lone esc: wake up
+                        break
+                    ibuf = ibuf[1:]        # unknown sequence: shed a byte
+                    continue
+                ch = chr(ibuf[0])
+                ibuf = ibuf[1:]
+                if ch in ("q", "\x03"):
                     running = False
                     break
                 game.key(ch)
-                drained += 1
-                r, _, _ = select.select([sys.stdin], [], [], 0)
             if not running:
                 break
             t0 = time.perf_counter()
@@ -2246,7 +2284,7 @@ def wolf_main():
             cost = time.perf_counter() - t0
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        sys.stdout.write("\x1b[?25h\x1b[?1049l")
+        sys.stdout.write("\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()
         if shim is not None:
             try:
@@ -2345,6 +2383,8 @@ class App:
         self.shader_guard = int(state.get("shader_guard", 0))
         if self.shader_guard:
             self.art.floor = self.SHADER_FLOOR
+        self.keep_awake = int(state.get("keep_awake", 1))
+        self._inhibit_p = None    # the sleep/lock inhibitor child
         self.sc_on = int(state.get("sc_on", 1))  # ☁ merged soundcloud
         self.full = False
         self.viz_max = False      # F: visualizer owns the whole terminal
@@ -2352,7 +2392,7 @@ class App:
         self.input_mode = False
         self.input_buf = ""
         self.input_purpose = "search"
-        self.wolf = None          # the hidden floor (search: "wolfenstein")
+        self.wolf = None          # the hidden floor (search: "bhop")
         self.picker = None            # playlist-picker modal state
         self.picker_sel = 0
         self.picker_track = None
@@ -2394,6 +2434,8 @@ class App:
                            "viz_morph": self.viz_morph,
                            "rich_search": self.rich_search,
                            "viz_art": self.viz_art,
+                           "shader_guard": self.shader_guard,
+                           "keep_awake": self.keep_awake,
                            "sc_on": self.sc_on,
                            "theme": THEMES[self.theme_i][0]}, f)
         except Exception:
@@ -2483,7 +2525,7 @@ class App:
                 return fn()
             raise
     def _wolf_start(self):
-        # the easter egg door: searching "wolfenstein" lands here instead
+        # the easter egg door: searching "bhop" lands here instead
         # of the API. music keeps playing — the game drinks the groove.
         # preferred: a dedicated shader-free opaque ghostty window
         # (ytm --wolf), where the true-black canvas can't be eaten by
@@ -3139,7 +3181,7 @@ class App:
                 self.input_mode = False
                 text = self.input_buf.strip()
                 if text and self.input_purpose == "search":
-                    if text.lower() == "wolfenstein":
+                    if text.lower() == "bhop":
                         # the search bar is the door (see Blackspace)
                         self.input_buf = ""
                         self._wolf_start()
@@ -3628,6 +3670,7 @@ class App:
             ("rich search", "rich_search", 0, 1, 1, ("off", "on")),
             ("art overlay", "viz_art", 0, 1, 1, ("off", "on")),
             ("shader guard", "shader_guard", 0, 1, 1, ("off", "on")),
+            ("keep awake", "keep_awake", 0, 1, 1, ("off", "on")),
             ("☁ soundcloud", "sc_on", 0, 1, 1, ("off", "on")),
         ]
 
@@ -5138,6 +5181,38 @@ class App:
             used += len(piece)
         return crop_pad(line + RESET, w)
 
+    def _inhibit_sync(self):
+        """While music plays (and keep awake is on), hold a sleep/lock
+        inhibitor: systemd-inhibit on linux (shows up in inhibitor
+        widgets, blocks suspend + idle lock), caffeinate on macOS.
+        Released the moment playback pauses or stops."""
+        playing = bool(self.now) and self.keep_awake \
+            and not self.player.props.get("pause")
+        p = self._inhibit_p
+        if p is not None and p.poll() is not None:
+            self._inhibit_p = p = None       # child died on its own
+        if playing and p is None:
+            cmd = None
+            if sys.platform == "darwin":
+                cmd = ["caffeinate", "-d", "-i"]
+            elif shutil.which("systemd-inhibit"):
+                cmd = ["systemd-inhibit", "--what=sleep:idle",
+                       "--who=NOCTURNE", "--why=music is playing",
+                       "--mode=block", "sleep", "infinity"]
+            if cmd:
+                try:
+                    self._inhibit_p = subprocess.Popen(
+                        cmd, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL)
+                except OSError:
+                    self.keep_awake = 0      # don't retry every frame
+        elif not playing and p is not None:
+            try:
+                p.kill()
+            except OSError:
+                pass
+            self._inhibit_p = None
+
     # ── main loop ────────────────────────────────────────────────────────────
     def run(self):
         fd = sys.stdin.fileno()
@@ -5164,6 +5239,7 @@ class App:
                     self._write_now()
                 # live lists: the visible playlist/library quietly
                 # re-pulls so edits from other devices appear on their own
+                self._inhibit_sync()
                 if self.authed and \
                         time.time() - getattr(self, "_live_t", 0.0) > 45:
                     self._live_t = time.time()
@@ -5219,6 +5295,11 @@ class App:
             sys.stdout.flush()
             self._save_state()
             self.now = None
+            if self._inhibit_p is not None:
+                try:
+                    self._inhibit_p.kill()
+                except OSError:
+                    pass
             self._write_now()
             self.tap.stop()
             self.player.quit()
