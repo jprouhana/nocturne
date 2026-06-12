@@ -1549,7 +1549,9 @@ class Blackspace:
         self.tt = 0.0            # floor time — rides the bass
         self.wtt = 0.0           # wall time — rides the mids
         self.pitch = 0.0         # mouse: vertical look
-        self.mturn = 0.0         # mouse: virtual-stick turn rate
+        self.mturn = 0.0         # mouse: edge-assist turn rate
+        self._mlast = None       # last mouse pixel position
+        self.audio_live = False  # is the tap actually hearing music
         self.pulse = self.pulse_s = self.heat = 0.0
         self.recoil = 0.0
         self.shocks = []         # landing shockwaves rippling the floor
@@ -1648,13 +1650,23 @@ class Blackspace:
         elif k in ("r", "R"):
             self._reset()                        # instant run restart
 
-    def mouse(self, fx, fy, pressed):
-        # terminal mouse = a virtual stick: horizontal offset from center
-        # sets the turn rate (edge = full lock), height sets the pitch.
-        # no pointer lock in a tty — rate-steering is the honest version.
-        dx = (fx - 0.5) * 2.0
-        self.mturn = 0.0 if abs(dx) < 0.08 else dx
-        self.pitch = (0.5 - fy) * 1.5
+    def mouse(self, x, y, fx, fy, pressed):
+        # csgo-style raw aim: pixel deltas drive the yaw 1:1 — sharp,
+        # to the hand. no pointer lock in a tty, so when the cursor pins
+        # in the outer edge band a steady assist turn keeps you going.
+        if self._mlast is not None:
+            dx = x - self._mlast[0]
+            dy = y - self._mlast[1]
+            if abs(dx) < 200 and abs(dy) < 200:    # teleports aren't aim
+                self.ang += dx * 0.0040
+                self.pitch = max(-0.8, min(0.8, self.pitch - dy * 0.0033))
+        self._mlast = (x, y)
+        if fx < 0.03:
+            self.mturn = -1.0
+        elif fx > 0.97:
+            self.mturn = 1.0
+        else:
+            self.mturn = 0.0
         if pressed:
             self.held["jump"] = time.time() + 0.22
 
@@ -1710,7 +1722,7 @@ class Blackspace:
             turn -= 2.9
         if self._held("RIGHT"):
             turn += 2.9
-        turn += self.mturn * abs(self.mturn) * 3.8   # quadratic ease
+        turn += self.mturn * 3.2                     # edge assist
         if turn:
             self.ang += turn * dt
             if not self.grounded:
@@ -1987,6 +1999,7 @@ class Blackspace:
                 mpulse, en, eb, em, _ = app._drop_groove(
                     raw, dt, time.time())
                 tre = getattr(app, "_tre_pulse", 0.0)
+                self.audio_live = bool(app.tap and app.tap.producing)
             except Exception:
                 pass
 
@@ -2030,7 +2043,7 @@ class Blackspace:
                       + math.sin(self.bob_t) * 2.2 * self.bob_amt
                       - self.recoil * 4)
         horizon = min(H - 10, max(8, horizon))
-        bright = 1.0 + 0.30 * self.pulse_s + 0.14 * tre
+        bright = 1.0 + 0.45 * self.pulse_s + 0.25 * tre
         eyez = 0.55 + self.z * 0.45
 
         # the sky: true void, deliberately BELOW the luminance cutoff —
@@ -2038,6 +2051,21 @@ class Blackspace:
         # anything else it reads near-black. either way: blackspace.
         void_ix = ex((8, 8, 14))
         idx[:] = void_ix
+        # sparse stars parallax the SKY (the pits get none — that black
+        # is the one that kills you)
+        star_ix = ex((96, 104, 142))
+        star_hi = ex((150, 158, 196))
+        for sx_ in range(0, W, 2):
+            a = (self.ang + (2 * sx_ / W - 1) * plane) % 6.28318
+            q = int(a * 60)
+            h1 = math.sin(q * 12.9898) * 43758.5453
+            f1 = h1 - math.floor(h1)
+            if f1 < 0.30:
+                h2 = math.sin(q * 78.233) * 24634.6345
+                f2 = h2 - math.floor(h2)
+                ry_ = int(horizon * (0.1 + 0.8 * f2))
+                if 0 <= ry_ < horizon:
+                    idx[ry_, sx_] = star_hi if f1 < 0.08 else star_ix
 
         # visible corridor slices as arrays for the vectorized floor
         x0w = int(self.px) - 14
@@ -2073,7 +2101,7 @@ class Blackspace:
                                                 * xs[None, :])
                 d1 = np.sqrt((fx - s1x) ** 2 + (fy - s1y) ** 2)
                 d2 = np.sqrt((fx - s2x) ** 2 + (fy - s2y) ** 2)
-                af = 1.0 + 0.4 * min(1.0, eb) + 0.25 * self.pulse_s
+                af = 1.0 + 0.85 * min(1.0, eb) + 0.3 * self.pulse_s
                 raw = (P["a1"] * af * np.sin(d1 * P["k1"] - 1.15 * t)
                        + P["a2"] * af * np.sin(d2 * P["k2"] + 0.85 * t)
                        + P["bias"])
@@ -2141,7 +2169,8 @@ class Blackspace:
         vv = (Y - wall_top[None, :]) / Hp[None, :]
         wmask = (vv >= 0) & (vv < 1)
         vy = (vv - 0.5) * 3
-        fog = (bright / (1 + 0.06 * perp * perp)
+        fog = (bright * (1 + 0.35 * min(1.0, em))
+               / (1 + 0.035 * perp * perp)
                * np.where(sides == 1, 0.82, 1.0))
         rawW = np.zeros((H, W), np.float32)
         UU = np.broadcast_to(uarr[None, :], (H, W))
@@ -2155,8 +2184,16 @@ class Blackspace:
         wi = np.clip(vnW * 63 * np.broadcast_to(fog[None, :], (H, W)),
                      0, 63).astype(np.int16)
         # walls keep a dim tint even at full fog — only the void is void
-        wi = np.maximum(wi, 7) + base[None, :]
+        wi = np.maximum(wi, 12) + base[None, :]
         idx[wmask] = wi[wmask]
+        # crest line: the wall announces its top edge against the sky
+        cols = np.arange(W)
+        rim = wall_top.astype(np.int32)
+        ok_rim = (rim >= 0) & (rim < H - 1)
+        idx[np.clip(rim, 0, H - 1)[ok_rim], cols[ok_rim]] = \
+            base[ok_rim] + 52
+        idx[np.clip(rim + 1, 0, H - 1)[ok_rim], cols[ok_rim]] = \
+            base[ok_rim] + 34
 
         # pickup hearts, far to near, occluded per column by the zbuffer
         inv = 1.0 / (plx * diry - dirx * ply)
@@ -2210,7 +2247,9 @@ class Blackspace:
         left = (BOLD + fg(WHITE) + "* " + self.msg_text + RESET
                 if self.msg_t > 0 else "")
         spd = math.hypot(self.vx, self.vy)
-        right = (fg(DGREY) + f"{spd:4.1f} u/s · {max(0, int(self.px - 1.5))}m"
+        note = "♪ " if self.audio_live else "∅ "
+        right = (fg(DGREY) + note
+                 + f"{spd:4.1f} u/s · {max(0, int(self.px - 1.5))}m"
                  f" · ♥{self.score} · best {self.best}m · esc wakes up"
                  + RESET)
         gap = w - visible_len(left) - visible_len(right)
@@ -3716,7 +3755,7 @@ class App:
              ("chunky", "hi-def", "pixel")),
             ("rich search", "rich_search", 0, 1, 1, ("off", "on")),
             ("art overlay", "viz_art", 0, 1, 1, ("off", "on")),
-            ("shader guard", "shader_guard", 0, 1, 1, ("off", "on")),
+            ("shader guard", "shader_guard", 0, 2, 1, ("off", "art", "full")),
             ("keep awake", "keep_awake", 0, 1, 1, ("off", "on")),
             ("☁ soundcloud", "sc_on", 0, 1, 1, ("off", "on")),
         ]
@@ -4832,16 +4871,24 @@ class App:
     def _drop_lut(self):
         """64-entry palette: dark → primary → secondary → accent → white.
         In cover mode the gradient comes from the album art instead.
-        Deliberately NOT shader-guarded: the visualizer's darks staying
-        transparent over the terminal wallpaper is the look — the guard
-        protects album ART only."""
+        shader guard scopes: 'art' leaves this transparent over the
+        wallpaper (the look); 'full' ALSO lifts this LUT — for shaders
+        whose cutoff swallows whole themes (red is luminance-poor, the
+        ytm theme can vanish entirely)."""
+        full = getattr(self, "shader_guard", 0) >= 2
+
+        def g(lut):
+            if not full:
+                return lut
+            import numpy as np
+            return np.maximum(lut, np.array(self.SHADER_FLOOR, float))
         if getattr(self, "viz_style", "") == "cover":
             now = getattr(self, "now", None)
             art = getattr(self, "art", None)
             if now is not None and art is not None:
                 pal = art.palette(getattr(now, "thumb", ""))
                 if pal is not None:
-                    return pal
+                    return g(pal)
         if self._drop_lut_cache is None:
             import numpy as np
             # anchored dark lows so light themes (ice…) still have contrast
@@ -4855,7 +4902,7 @@ class App:
                 f = (t - pos[a]) / (pos[a + 1] - pos[a])
                 lut.append(lerp(stops[a], stops[a + 1], f))
             self._drop_lut_cache = np.array(lut, dtype=float)
-        return self._drop_lut_cache
+        return g(self._drop_lut_cache)
 
     def _drop_groove(self, raw, dt, now):
         """Beat-locked drive signals. Raw spectrum jitter is flattened into
