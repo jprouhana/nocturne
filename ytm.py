@@ -2850,7 +2850,7 @@ class App:
                 self.say("session went stale — refreshed from your browser")
                 return fn()
             raise
-    def _wolf_start(self):
+    def _wolf_start(self, mode="bhop"):
         # the easter egg door: searching "bhop" lands here instead
         # of the API. music keeps playing — the game drinks the groove.
         # preferred engine: the browser build (true pointer lock — click
@@ -2866,7 +2866,8 @@ class App:
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True)
                 subprocess.Popen(
-                    ["firefox", "--new-window", "file://" + web],
+                    ["firefox", "--new-window",
+                     "file://" + web + "#" + mode],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True)
                 self.say("the blackspace opens a door. click to lock in.")
@@ -3564,10 +3565,10 @@ class App:
                 self.input_mode = False
                 text = self.input_buf.strip()
                 if text and self.input_purpose == "search":
-                    if text.lower() == "bhop":
+                    if text.lower() in ("bhop", "surf"):
                         # the search bar is the door (see Blackspace)
                         self.input_buf = ""
-                        self._wolf_start()
+                        self._wolf_start(text.lower())
                         return
                     self.tab = 0
                     self.do_search(text)
@@ -3931,9 +3932,17 @@ class App:
                 3: "queue is empty — R makes a mix of any song",
             }[self.tab if not (self.tab == 2 and self.pl_open) else 2]
             for i in range(rows):
-                out.append(crop_pad(
-                    f"   {fg(DGREY)}{ITAL}{hint}{RESET}" if i == rows // 2
-                    else "", w))
+                if i == rows // 2:
+                    out.append(crop_pad(
+                        f"   {fg(DGREY)}{ITAL}{hint}{RESET}", w))
+                elif i == rows // 2 + 2 and self.tab == 0:
+                    # the door is allowed to whisper now (his call)
+                    out.append(crop_pad(
+                        f"   {fg(lerp(DARK, RED, 0.45))}{ITAL}"
+                        f"* they say searching \"bhop\" or \"surf\" "
+                        f"opens somewhere else.{RESET}", w))
+                else:
+                    out.append(crop_pad("", w))
             return out
 
         for r in range(rows):
