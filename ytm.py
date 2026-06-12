@@ -42,6 +42,7 @@ import tty
 import unicodedata
 import urllib.request
 import zlib
+import dataclasses
 from dataclasses import dataclass, field
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -49,6 +50,31 @@ from dataclasses import dataclass, field
 # ──────────────────────────────────────────────────────────────────────────────
 
 CONFIG_DIR = os.path.expanduser("~/.config/ytm-tui")
+CACHE_DIR = os.path.expanduser("~/.cache/nocturne")
+ART_CACHE_DIR = os.path.join(CACHE_DIR, "art")
+
+
+def cache_load(name, max_age=7 * 86400):
+    """Stale-while-revalidate: yesterday's library beats a blank tab."""
+    try:
+        p = os.path.join(CACHE_DIR, name + ".json")
+        if time.time() - os.path.getmtime(p) > max_age:
+            return None
+        with open(p) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def cache_save(name, data):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        p = os.path.join(CACHE_DIR, name + ".json")
+        with open(p + ".tmp", "w") as f:
+            json.dump(data, f)
+        os.replace(p + ".tmp", p)
+    except Exception:
+        pass
 AUTH_FILE = os.path.join(CONFIG_DIR, "browser.json")
 OAUTH_FILE = os.path.join(CONFIG_DIR, "oauth.json")
 OAUTH_CLIENT = os.path.join(CONFIG_DIR, "oauth_client.json")
@@ -987,14 +1013,34 @@ class ArtCache:
                          daemon=True).start()
         return None
 
+    @staticmethod
+    def _raw(url):
+        """Artwork bytes, disk-cached — three different renderers want
+        the same image, and relaunches want it instantly."""
+        import hashlib
+        p = os.path.join(ART_CACHE_DIR, hashlib.sha1(url.encode()).hexdigest())
+        try:
+            with open(p, "rb") as f:
+                return f.read()
+        except OSError:
+            pass
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        raw = urllib.request.urlopen(req, timeout=10).read()
+        try:
+            os.makedirs(ART_CACHE_DIR, exist_ok=True)
+            with open(p + ".tmp", "wb") as f:
+                f.write(raw)
+            os.replace(p + ".tmp", p)
+        except OSError:
+            pass
+        return raw
+
     def _fetch_rgb(self, url):
         try:
             from PIL import Image
             import io
             import numpy as np
-            req = urllib.request.Request(url, headers={"User-Agent": UA})
-            raw = urllib.request.urlopen(req, timeout=10).read()
-            img = Image.open(io.BytesIO(raw)).convert("RGB")
+            img = Image.open(io.BytesIO(self._raw(url))).convert("RGB")
             side = min(img.size)
             left = (img.width - side) // 2
             top = (img.height - side) // 2
@@ -1011,9 +1057,8 @@ class ArtCache:
             from PIL import Image
             import io
             import numpy as np
-            req = urllib.request.Request(url, headers={"User-Agent": UA})
-            raw = urllib.request.urlopen(req, timeout=10).read()
-            img = Image.open(io.BytesIO(raw)).convert("RGB").resize((32, 32))
+            img = Image.open(io.BytesIO(self._raw(url))) \
+                .convert("RGB").resize((32, 32))
             arr = np.asarray(img).reshape(-1, 3).astype(np.float32)
             lum = arr @ np.float32([0.299, 0.587, 0.114])
             order = np.argsort(lum)
@@ -1044,9 +1089,7 @@ class ArtCache:
         try:
             from PIL import Image
             import io
-            req = urllib.request.Request(url, headers={"User-Agent": UA})
-            raw = urllib.request.urlopen(req, timeout=10).read()
-            img = Image.open(io.BytesIO(raw)).convert("RGB")
+            img = Image.open(io.BytesIO(self._raw(url))).convert("RGB")
             # crop to square, then sample w × h*2 pixels (half-block doubling)
             side = min(img.size)
             left = (img.width - side) // 2
@@ -1657,7 +1700,7 @@ class Blackspace:
         if self._mlast is not None:
             dx = x - self._mlast[0]
             dy = y - self._mlast[1]
-            if abs(dx) < 200 and abs(dy) < 200:    # teleports aren't aim
+            if abs(dx) < 500 and abs(dy) < 500:    # teleports aren't aim
                 self.ang += dx * 0.0040
                 self.pitch = max(-0.8, min(0.8, self.pitch - dy * 0.0033))
         self._mlast = (x, y)
@@ -2288,9 +2331,22 @@ def wolf_main():
         attrs = termios.tcgetattr(fd)
         attrs[1] |= termios.OPOST | termios.ONLCR
         termios.tcsetattr(fd, termios.TCSANOW, attrs)
-        # any-motion mouse tracking, SGR encoded — the aim hand
-        sys.stdout.write("\x1b[?1003h\x1b[?1006h")
+        # any-motion mouse tracking, SGR encoded, PIXEL coords —
+        # raw deltas are the aim hand (csgo-style, not a stick)
+        sys.stdout.write("\x1b[?1003h\x1b[?1006h\x1b[?1016h")
         sys.stdout.flush()
+
+        def win_px():
+            try:
+                ws = struct.unpack(
+                    "HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ,
+                                        b"\0" * 8))
+                if ws[2] and ws[3]:
+                    return ws[2], ws[3]
+            except OSError:
+                pass
+            return lastsz[0] * 10, lastsz[1] * 20
+        pxsz = (1, 1)
         mouse_re = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
         running, cost, lastsz = True, 0.0, (1, 1)
         ibuf = b""
@@ -2310,8 +2366,9 @@ def wolf_main():
                                       int(m.group(3)))
                         if bt < 64:    # clicks + moves; wheel ignored
                             game.mouse(
-                                (cx - 1) / max(1, lastsz[0] - 1),
-                                (cy - 1) / max(1, lastsz[1] - 1),
+                                cx, cy,
+                                cx / max(1, pxsz[0]),
+                                cy / max(1, pxsz[1]),
                                 m.group(4) == b"M" and (bt & 0x43) == 0)
                         ibuf = ibuf[m.end():]
                         continue
@@ -2343,6 +2400,7 @@ def wolf_main():
             w, h = size.columns, size.lines
             if (w, h) != lastsz:
                 lastsz = (w, h)
+                pxsz = win_px()
                 sys.stdout.write("\x1b[2J")   # no stale rows after resize
             if w < 40 or h < 12:
                 sys.stdout.write("\x1b[H\x1b[2Jthe door is too small.")
@@ -2369,7 +2427,8 @@ def wolf_main():
             cost = time.perf_counter() - t0
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        sys.stdout.write("\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l")
+        sys.stdout.write("\x1b[?1003l\x1b[?1006l\x1b[?1016l"
+                         "\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()
         if shim is not None:
             try:
@@ -2679,6 +2738,14 @@ class App:
         if not self.authed and not sct:
             self.say("library needs sign-in → quit and run: ytm --login")
             return
+        # last session's library appears INSTANTLY; the network refresh
+        # quietly replaces it when it lands
+        cached = cache_load("library")
+        if cached and not self.lib:
+            try:
+                self.lib = [Track(**t) for t in cached]
+            except TypeError:
+                pass
         self.loading_msg = "loading liked songs…"
 
         def work():
@@ -2692,6 +2759,8 @@ class App:
                                if t.get("videoId")]
                 sc_part = sc_likes(sct) if sct else []
                 self.lib = weave(yt_part, sc_part)
+                cache_save("library", [dataclasses.asdict(t)
+                                       for t in self.lib])
                 msg = f"{len(yt_part)} liked songs"
                 if sc_part:
                     msg += f" + {len(sc_part)} ☁"
@@ -2711,6 +2780,12 @@ class App:
         if not self.authed and not sct:
             self.say("playlists need sign-in → quit and run: ytm --login")
             return
+        cached = cache_load("playlists")
+        if cached and not self.playlists:
+            try:
+                self.playlists = [Playlist(**p) for p in cached]
+            except TypeError:
+                pass
         self.loading_msg = "loading playlists…"
 
         def work():
@@ -2728,6 +2803,8 @@ class App:
                         for p in items]
                 sc_part = sc_playlists(sct) if sct else []
                 self.playlists = yt_part + sc_part
+                cache_save("playlists", [dataclasses.asdict(p)
+                                         for p in self.playlists])
                 if sc_part:
                     self.say(f"{len(yt_part)} playlists "
                              f"+ {len(sc_part)} ☁")
@@ -5815,6 +5892,7 @@ def uninstall():
             print(f"✗ nocturne launcher: {e}")
     if wipe_cfg and os.path.isdir(CONFIG_DIR):
         shutil.rmtree(CONFIG_DIR, ignore_errors=True)
+        shutil.rmtree(CACHE_DIR, ignore_errors=True)
         print(f"✓ removed {CONFIG_DIR} (sign-in included)")
     elif os.path.isdir(CONFIG_DIR):
         print(f"○ kept {CONFIG_DIR} — sign-in survives a reinstall")
