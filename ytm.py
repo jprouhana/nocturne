@@ -278,6 +278,7 @@ class Track:
     duration: str = ""
     thumb: str = ""
     set_video_id: str = ""   # playlist membership id, needed for removal
+    stream_hint: str = ""    # sc: transcoding endpoints + auth (json)
 
     @property
     def source(self):
@@ -449,6 +450,19 @@ def _sc_art(url):
     return (url or "").replace("-large.", "-t500x500.")
 
 
+def _sc_hint_of(tr):
+    """The plain (non-DRM) transcoding endpoints + the track's auth
+    token, packed into the Track — turns play-time stream resolution
+    into one ~0.3s api call instead of a 5s yt-dlp run."""
+    urls = [t["url"] for t in (tr.get("media") or {}).get("transcodings", [])
+            if t.get("url")
+            and t.get("format", {}).get("protocol") in ("progressive", "hls")]
+    if not urls:
+        return ""
+    return json.dumps({"a": tr.get("track_authorization") or "",
+                       "u": urls[:4]})
+
+
 def _sc_track_of(tr):
     art = (tr.get("artwork_url")
            or (tr.get("user") or {}).get("avatar_url") or "")
@@ -456,7 +470,50 @@ def _sc_track_of(tr):
                  (tr.get("user") or {}).get("username") or "SoundCloud",
                  album="SoundCloud",
                  duration=fmt_time((tr.get("duration") or 0) / 1000),
-                 thumb=_sc_art(art))
+                 thumb=_sc_art(art),
+                 stream_hint=_sc_hint_of(tr))
+
+
+def sc_resolve_fast(track):
+    """Direct stream URL via api-v2 (~0.3s). Tries the packed hint,
+    then a fresh resolve of the permalink (hints go stale), and gives
+    up ('') for Go+/encrypted tracks — the yt-dlp path handles those."""
+    import urllib.parse
+    token = sc_token()
+    cid = _sc_client_id()
+    if not cid:
+        return ""
+
+    def try_urls(urls, auth):
+        q = f"?client_id={cid}"
+        if auth:
+            q += "&track_authorization=" + urllib.parse.quote(auth)
+        for u in urls:
+            try:
+                got = _sc_get(u + q, token).get("url") or ""
+                if got:
+                    return got
+            except Exception:
+                continue
+        return ""
+
+    if track.stream_hint:
+        try:
+            h = json.loads(track.stream_hint)
+            got = try_urls(h.get("u") or [], h.get("a") or "")
+            if got:
+                return got
+        except Exception:
+            pass
+    try:
+        tr = _sc_get("https://api-v2.soundcloud.com/resolve?url="
+                     + urllib.parse.quote(track.video_id, safe="")
+                     + f"&client_id={cid}", token)
+        urls = [t["url"] for t in (tr.get("media") or {}).get("transcodings", [])
+                if t.get("format", {}).get("protocol") in ("progressive", "hls")]
+        return try_urls(urls, tr.get("track_authorization") or "")
+    except Exception:
+        return ""
 
 
 def _sc_uid(token):
@@ -3014,14 +3071,36 @@ class App:
         # a prefetched direct stream skips mpv's yt-dlp resolve (~1-3s)
         hit = self._url_cache.get(self.now.video_id)
         direct = hit[0] if hit and time.time() - hit[1] < 3000 else None
-        self.player.play_video(self.now.video_id, direct=direct)
+        if direct is None and self.now.source == "sc":
+            # soundcloud resolves in ~0.3s through api-v2 — do that in a
+            # thread and start playback the moment it lands, instead of
+            # handing mpv's yt-dlp hook a 5-second job
+            trk = self.now
+
+            def work():
+                try:
+                    u = sc_resolve_fast(trk)
+                except Exception:
+                    u = ""
+                if self.now is trk:          # user didn't skip meanwhile
+                    self.player.play_video(trk.video_id, direct=u or None)
+            self.player._loading = True
+            threading.Thread(target=work, daemon=True).start()
+        else:
+            self.player.play_video(self.now.video_id, direct=direct)
         self._write_now()
         self.say(f"▶ {self.now.title}")
         self._prefetch()
 
     def _resolve_stream(self, vid):
         """Resolve a track to its direct audio URL ourselves — the same
-        thing mpv's hook does, done ahead of time."""
+        thing mpv's hook does, done ahead of time. soundcloud goes
+        through api-v2 first (~0.3s); yt-dlp is the fallback."""
+        if vid.startswith("http"):
+            trk = next((t for t in self.queue if t.video_id == vid), None)
+            u = sc_resolve_fast(trk or Track(vid, "", ""))
+            if u:
+                return u
         import yt_dlp
         target = vid if vid.startswith("http") \
             else f"https://music.youtube.com/watch?v={vid}"
