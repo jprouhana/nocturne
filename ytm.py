@@ -170,6 +170,12 @@ def grad_text(text, c1, c2):
 
 
 def char_w(ch):
+    # zero-width: combining accents (гу́би), variation selectors (💋️),
+    # zero-width (non-)joiners — terminals draw them as 0 cells; counting
+    # them as 1 skews every row they appear in (drifting separators,
+    # clipped durations)
+    if unicodedata.combining(ch) or ch in "\u200b\u200c\u200d\ufe0e\ufe0f\u200e\u200f":
+        return 0
     return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
 
 
@@ -2531,8 +2537,17 @@ def wolf_pulse_main():
     (someone is already serving the groove)."""
     import http.server
     state = {"pulse": 0.0, "energy": 0.0, "bass": 0.0, "mid": 0.0,
-             "treble": 0.0, "live": False}
+             "treble": 0.0, "live": False, "theme": None}
     last_req = [time.time()]
+
+    def read_theme():
+        try:
+            with open(STATE_FILE) as f:
+                ti = int(json.load(f).get("theme_i", 0))
+        except Exception:
+            ti = 0
+        name, p1, p2, p3 = THEMES[ti % len(THEMES)]
+        return {"name": name, "colors": [list(p1), list(p2), list(p3)]}
     shim = type("WolfAudio", (), {})()
     shim.tap = SpectrumTap()
     shim._drop_e = [0.0, 0.0, 0.0]
@@ -2541,7 +2556,11 @@ def wolf_pulse_main():
 
     def pump():
         last = time.perf_counter()
+        beat = 0
         while time.time() - last_req[0] < 90:
+            beat += 1
+            if beat % 60 == 1:          # every ~2s: follow theme changes
+                state["theme"] = read_theme()
             now = time.perf_counter()
             dt = min(0.25, now - last)
             last = now
