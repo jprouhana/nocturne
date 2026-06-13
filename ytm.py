@@ -2871,6 +2871,34 @@ class App:
                 self.say("session went stale — refreshed from your browser")
                 return fn()
             raise
+    def _merge_likes(self):
+        """Y: mirror likes across YT Music + SoundCloud. Runs the
+        preview+confirm in its own window so the player keeps playing;
+        falls back to a hint if there's no GUI."""
+        if not (auth_present() and sc_token()):
+            self.say("merge needs both sign-ins: ytm --login & --sc-login")
+            return
+        gui = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")
+        me = os.path.abspath(__file__)
+        if gui and shutil.which("ghostty"):
+            import shlex
+            inner = (f"{shlex.quote(sys.executable)} {shlex.quote(me)} "
+                     "--sync-likes; printf '\\npress enter to close…'; read _")
+            try:
+                subprocess.Popen(
+                    ["ghostty", "--gtk-single-instance=false",
+                     "--custom-shader=", "--background-opacity=1",
+                     "--title=nocturne · merge likes",
+                     "-e", "sh", "-c", inner],
+                    env=dict(os.environ, NOCTURNE_PURE="1"),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
+                self.say("♥ merge likes — preview opened in a new window")
+                return
+            except Exception:
+                pass
+        self.say("merge likes — run in a terminal:  nocturne --sync-likes")
+
     def _wolf_start(self, mode="bhop"):
         # the easter egg door: searching "bhop" lands here instead
         # of the API. music keeps playing — the game drinks the groove.
@@ -3688,6 +3716,8 @@ class App:
             self.add_to_queue()
         elif k == "L":
             self.like_current()
+        elif k == "Y":
+            self._merge_likes()
         elif k == "S":
             cyc = ("all", "yt", "sc")
             self.src_filter = cyc[
@@ -4136,10 +4166,10 @@ class App:
                   ("+ / -", "volume"), ("m", "mute"),
                   ("s", "shuffle"), ("r", "repeat / loop"),
                   ("R", "mix from song")]),
-        ("SOUL", [("L", "like / unlike"), ("/", "search"),
-                  ("a", "add to queue"), ("A", "→ playlist"),
-                  ("N", "new playlist"), ("x", "remove"),
-                  ("D D", "delete playlist")]),
+        ("SOUL", [("L", "like / unlike"), ("Y", "merge likes yt<>sc"),
+                  ("/", "search"), ("a", "add to queue"),
+                  ("A", "→ playlist"), ("N", "new playlist"),
+                  ("x", "remove"), ("D D", "delete playlist")]),
         ("VISUALS", [("v", "visualizer"), ("c", "theme"),
                      ("p", "pixel quality"), ("t", "art overlay"),
                      ("F", "max visualizer"), ("f", "fullscreen"),
