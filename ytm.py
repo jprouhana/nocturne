@@ -226,8 +226,18 @@ def ansi_cells(s, w):
             i = m.end()
             continue
         ch = s[i]
+        cw = char_w(ch)
+        if cw == 0 and cells:
+            # a combining accent (гу́би) / variation selector draws on the
+            # PREVIOUS glyph and takes no column — glue it to that cell so
+            # the grid stays aligned to real columns (else overlays like
+            # the heart splash shift one cell per mark on that row)
+            sgr, prev = cells[-1]
+            cells[-1] = (sgr, prev + ch)
+            i += 1
+            continue
         cells.append((cur, ch))
-        if char_w(ch) == 2 and len(cells) < w:
+        if cw == 2 and len(cells) < w:
             cells.append((cur, ""))
         i += 1
     while len(cells) < w:
