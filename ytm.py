@@ -5665,6 +5665,12 @@ class App:
                 elif self.now or self.viz_max:
                     tick = (0.008 if self.viz_style in ("drop", "cover")
                             else 0.016)
+                    # the commands box is for reading — while it's up
+                    # the viz behind it doesn't need 125fps. 25fps costs
+                    # ~5x less, so the box flames hold their pace even
+                    # when the rest of the machine is busy
+                    if self.help:
+                        tick = 0.04
                 elif self.input_mode or self.help:
                     tick = 0.04   # the help box's flames keep dancing
                 else:
@@ -6009,6 +6015,170 @@ def doctor():
     return ok
 
 
+# ── cross-platform like sync ──────────────────────────────────────────────────
+# mirror your likes between YouTube Music and SoundCloud. fuzzy-matched
+# (titles full of "slowed + reverb", "TikTok remix", bootlegs) so it errs
+# toward SKIPPING rather than liking the wrong song. preview by default;
+# only writes with apply=True.
+
+_SYNC_STOP = re.compile(
+    r"\b(slowed|reverb|sped\s*up|tiktok|bootleg|edit|extended|intro|outro|"
+    r"lyrics?|official|audio|video|visualizer|hardstyle|nightcore|prod|feat|"
+    r"ft|mixx*|mix|cover|version|super|ultra|the|prod\.?)\b", re.I)
+
+
+def _sync_norm(s):
+    s = s.lower()
+    s = re.sub(r"\[[^\]]*\]", " ", s)        # [TikTok], [prod ...]
+    s = re.sub(r"\([^)]*\)", " ", s)         # (slowed + reverb)
+    s = _SYNC_STOP.sub(" ", s)
+    s = re.sub(r"[^\w\s]", " ", s, flags=re.U)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _sync_tokens(s):
+    return set(t for t in _sync_norm(s).split() if len(t) > 1)
+
+
+def _sync_score(at, aa, bt, ba):
+    st, ct = _sync_tokens(at), _sync_tokens(bt)
+    if not st or not ct:
+        return 0.0
+    title = len(st & ct) / len(st | ct)
+    sa, ca = _sync_tokens(aa), _sync_tokens(ba)
+    artist = (len(sa & ca) / len(sa | ca)) if (sa and ca) else 0.4
+    return 0.72 * title + 0.28 * artist
+
+
+def _yt_search(yt, query, n=6):
+    # filter='songs' KeyErrors on authed accounts — unfiltered + filter here
+    try:
+        return [Track.from_item(i) for i in yt.search(query, limit=n)
+                if i.get("videoId")
+                and i.get("resultType") in ("song", "video")]
+    except Exception:
+        return []
+
+
+def _sync_plan(src, dst, search_fn, threshold):
+    """Returns (already_there, matches[(src,dst,score)], misses). Read
+    only — searches and scores, writes nothing."""
+    from concurrent.futures import ThreadPoolExecutor
+    dst_sig = [(_sync_tokens(t.title), _sync_tokens(t.artist)) for t in dst]
+
+    def already(s):
+        st, sa = _sync_tokens(s.title), _sync_tokens(s.artist)
+        if not st:
+            return False
+        for ct, ca in dst_sig:
+            if not ct:
+                continue
+            title = len(st & ct) / len(st | ct)
+            artist = (len(sa & ca) / len(sa | ca)) if (sa and ca) else 0.4
+            if 0.72 * title + 0.28 * artist >= threshold:
+                return True
+        return False
+
+    def work(s):
+        if already(s):
+            return ("have", s, None, 1.0)
+        best, bs = None, 0.0
+        for c in search_fn(f"{s.title} {s.artist}"):
+            sc = _sync_score(s.title, s.artist, c.title, c.artist)
+            if sc > bs:
+                best, bs = c, sc
+        return ("match", s, best, bs) if bs >= threshold \
+            else ("miss", s, best, bs)
+
+    with ThreadPoolExecutor(6) as ex:
+        rows = list(ex.map(work, src))
+    return ([r for r in rows if r[0] == "have"],
+            [(s, b, sc) for tag, s, b, sc in rows if tag == "match"],
+            [r for r in rows if r[0] == "miss"])
+
+
+def _sync_preview(label, src_n, have, matches, miss):
+    print(f"\n{label}")
+    print(f"  {src_n} source likes  ·  {len(have)} already there  ·  "
+          f"{len(matches)} to mirror  ·  {len(miss)} no confident match")
+    for s, b, sc in sorted(matches, key=lambda r: -r[2])[:40]:
+        print(f"    {sc:.2f}  {s.title[:30]:32s} → {b.title[:34]}")
+
+
+def _sync_apply(matches, like_fn):
+    done = 0
+    for _, b, _ in matches:
+        try:
+            like_fn(b)
+            done += 1
+        except Exception:
+            pass
+        print(f"\r  {done}/{len(matches)}", end="", flush=True)
+        time.sleep(0.25)              # gentle on the API — no flag risk
+    print(f"\r  ✓ mirrored {done}/{len(matches)}            ")
+    return done
+
+
+def sync_likes(direction="both", apply=False, threshold=0.5, limit=500):
+    """Mirror likes across YouTube Music and SoundCloud. Builds the plan,
+    previews it, then (with --apply, or a yes at the prompt) writes it.
+    Honest by design: roughly half of a SoundCloud library — slowed
+    edits, bootlegs, remixes — has no YT Music twin and is SKIPPED rather
+    than mis-matched."""
+    yt = make_ytmusic() if auth_present() else None
+    sct = sc_token()
+    if not yt:
+        print("  sign in to YouTube Music first:  nocturne --login")
+        return False
+    if not sct:
+        print("  sign in to SoundCloud first:  nocturne --sc-login")
+        return False
+    print("→ reading both libraries…")
+    try:
+        d = yt.get_liked_songs(limit=limit)
+        yt_l = [Track.from_item(t) for t in d.get("tracks", [])
+                if t.get("videoId")]
+    except Exception as e:
+        print(f"  couldn't read YT likes: {e}")
+        yt_l = []
+    sc_l = sc_likes(sct, n=limit)
+    print(f"  {len(yt_l)} youtube likes  ·  {len(sc_l)} soundcloud likes")
+    print("→ matching (this part only reads)…")
+
+    plans = []          # (matches, like_fn)
+    if direction in ("both", "sc2yt"):
+        have, matches, miss = _sync_plan(
+            sc_l, yt_l, lambda q: _yt_search(yt, q), threshold)
+        _sync_preview("☁ → ♪  soundcloud likes onto youtube music",
+                      len(sc_l), have, matches, miss)
+        plans.append((matches, lambda t: yt.rate_song(t.video_id, "LIKE")))
+    if direction in ("both", "yt2sc"):
+        have, matches, miss = _sync_plan(
+            yt_l, sc_l, lambda q: _sc_extract(f"scsearch6:{q}", 6), threshold)
+        _sync_preview("♪ → ☁  youtube likes onto soundcloud",
+                      len(yt_l), have, matches, miss)
+        plans.append((matches, lambda t: sc_like(t, on=True)))
+
+    total = sum(len(m) for m, _ in plans)
+    if total == 0:
+        print("\n  nothing new to mirror — your likes already line up.")
+        return True
+    if not apply and sys.stdin.isatty():
+        try:
+            apply = input(f"\n  mirror these {total} likes now? [y/N] ") \
+                .strip().lower() in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            apply = False
+    if not apply:
+        print(f"\n  PREVIEW only — nothing changed. to do it:"
+              "  nocturne --sync-likes --apply")
+        return True
+    print()
+    done = sum(_sync_apply(m, fn) for m, fn in plans if m)
+    print(f"\n  ✓ done — {done} new cross-platform likes")
+    return True
+
+
 def version_string():
     here = os.path.dirname(os.path.abspath(__file__))
     try:
@@ -6253,6 +6423,14 @@ def main():
     ap.add_argument("--sc-login", action="store_true",
                     help="sign in to soundcloud (lifts the session from "
                          "your browser — likes land in the library)")
+    ap.add_argument("--sync-likes", action="store_true",
+                    help="mirror your likes across YouTube Music and "
+                         "SoundCloud (preview unless --apply)")
+    ap.add_argument("--apply", action="store_true",
+                    help="with --sync-likes: actually like (default: preview)")
+    ap.add_argument("--sync-dir", choices=["both", "sc2yt", "yt2sc"],
+                    default="both",
+                    help="direction for --sync-likes (default: both)")
     ap.add_argument("--auth-firefox", action="store_true",
                     help="import session from Firefox cookies")
     ap.add_argument("--auth-browser", metavar="NAME",
@@ -6299,6 +6477,8 @@ def main():
         sys.exit(0 if login_wizard() else 1)
     if args.sc_login:
         sys.exit(0 if sc_login() else 1)
+    if args.sync_likes:
+        sys.exit(0 if sync_likes(args.sync_dir, apply=args.apply) else 1)
     if args.oauth:
         sys.exit(0 if oauth_login() else 1)
     if args.auth:
