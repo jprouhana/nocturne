@@ -160,6 +160,17 @@ def lerp(a, b, t):
     return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
+def heart_lerp(t):
+    """A heart's pulse color. Normally the theme's RED→PINK, but when a
+    theme's primary is desaturated (batman's Gotham slate), a grey heart
+    reads as broken — so those fall back to a real red. A heart should
+    always look like a heart."""
+    mx, mn = max(RED), min(RED)
+    if mx and (mx - mn) / mx < 0.35:
+        return lerp((228, 42, 60), (255, 132, 162), t)
+    return lerp(RED, PINK, t)
+
+
 def grad_text(text, c1, c2):
     """Color text with a horizontal gradient."""
     n = max(len(text) - 1, 1)
@@ -3967,8 +3978,7 @@ class App:
                     # hollow and faded, everything else waits as dim
                     # hearts — a liked song IS a heart, after all
                     if playing:
-                        hc = lerp(RED, PINK,
-                                  0.5 + 0.5 * math.sin(time.time() * 6))
+                        hc = heart_lerp(0.5 + 0.5 * math.sin(time.time() * 6))
                         mark = fg(hc) + "♥ " + RESET
                     elif self.tab == 3 and i < self.qpos:
                         mark = fg(DGREY) + "♡ " + RESET
@@ -4135,7 +4145,7 @@ class App:
         border, the soul as section bullet, asterisk sign-off. Any key
         closes it. Exists because the footer hints truncate on narrow
         terminals and people couldn't find the rest."""
-        hc = lerp(RED, PINK, 0.5 + 0.5 * math.sin(time.time() * 6))
+        hc = heart_lerp(0.5 + 0.5 * math.sin(time.time() * 6))
         bw = min(w - 2, 72)
         two = bw >= 58
         ncols = 2 if two else 1
@@ -4399,7 +4409,7 @@ class App:
         import numpy as np
         rows, cols, pad_l, band0 = self._splash_geom(out, w)
         s = min(1.0, 0.35 + t * 3.5)             # pop-in scale
-        c = lerp(RED, PINK, 0.5 + 0.5 * math.sin(t * 9))
+        c = heart_lerp(0.5 + 0.5 * math.sin(t * 9))
         pix = self._heart_mask(rows, cols, s)
         # the heart burns: flame tongues lick up from the crown in the
         # complement of whatever color the heart is pulsing through.
@@ -4450,9 +4460,9 @@ class App:
         inside = self._heart_mask(rows, cols)
         u = max(0.0, (t - 0.35) / 1.45)          # 0 = crack opens, 1 = gone
         if t < 0.35:                             # panic heartbeat
-            c = lerp(RED, PINK, 0.5 + 0.5 * math.sin(t * 26))
+            c = heart_lerp(0.5 + 0.5 * math.sin(t * 26))
         else:
-            c = lerp(RED, (115, 115, 130), min(1.0, u * 1.5))
+            c = lerp(heart_lerp(0.5), (115, 115, 130), min(1.0, u * 1.5))
 
         ph, pw = rows * 2, cols
         pix = np.zeros((ph + int(u * u * 12) + 2, pw), dtype=bool)
