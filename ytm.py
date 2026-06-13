@@ -161,13 +161,8 @@ def lerp(a, b, t):
 
 
 def heart_lerp(t):
-    """A heart's pulse color. Normally the theme's RED→PINK, but when a
-    theme's primary is desaturated (batman's Gotham slate), a grey heart
-    reads as broken — so those fall back to a real red. A heart should
-    always look like a heart."""
-    mx, mn = max(RED), min(RED)
-    if mx and (mx - mn) / mx < 0.35:
-        return lerp((228, 42, 60), (255, 132, 162), t)
+    """A heart's pulse color — the theme's RED→PINK, following the
+    active theme (batman's slate, synthwave's pink, etc.)."""
     return lerp(RED, PINK, t)
 
 
