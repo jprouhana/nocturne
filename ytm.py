@@ -52,6 +52,22 @@ from dataclasses import dataclass, field
 CONFIG_DIR = os.path.expanduser("~/.config/ytm-tui")
 CACHE_DIR = os.path.expanduser("~/.cache/nocturne")
 ART_CACHE_DIR = os.path.join(CACHE_DIR, "art")
+CRASH_LOG = os.path.join(CACHE_DIR, "crash.log")
+
+
+def crash_log(where, exc):
+    """Append a traceback so a random crash leaves a trail instead of
+    vanishing. Read it with:  cat ~/.cache/nocturne/crash.log"""
+    try:
+        import traceback
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(CRASH_LOG, "a") as f:
+            f.write("\n=== %s  %s ===\n" % (
+                where, time.strftime("%Y-%m-%d %H:%M:%S")))
+            f.write("".join(traceback.format_exception(
+                type(exc), exc, exc.__traceback__)))
+    except Exception:
+        pass
 
 
 def shader_active():
@@ -5702,14 +5718,14 @@ class App:
                         self._pl_refresh()
                     elif self.tab == 1 and self._lib_fetched:
                         self._lib_refresh()
-                # the plasma runs flat out (~125 fps tick, render cost is
-                # the real ceiling), every other style at 60; idle screen
-                # is lazier
+                # every viz style caps at 60fps; idle screen is lazier.
+                # pixel modes (drop/cover) used to run flat out (~125fps),
+                # but that streamed a full kitty-graphics bitmap per frame
+                # and segfaulted ghostty's image store — 60 is plenty
                 if self.wolf is not None:
                     tick = 0.012   # the hidden floor is a game — keep it hot
                 elif self.now or self.viz_max:
-                    tick = (0.008 if self.viz_style in ("drop", "cover")
-                            else 0.016)
+                    tick = 0.016
                     # the commands box is for reading — while it's up
                     # the viz behind it doesn't need 125fps. 25fps costs
                     # ~5x less, so the box flames hold their pace even
@@ -5738,7 +5754,11 @@ class App:
                     max(0.002, tick - getattr(self, "_frame_cost", 0.0)))
                 drained = 0
                 while k and self.running:
-                    self.handle_key(k)
+                    try:
+                        self.handle_key(k)
+                    except Exception as e:
+                        crash_log("handle_key", e)   # one bad key ≠ death
+                        self.say("hit a snag — logged it, carrying on")
                     self._key_t = time.time()
                     # drain anything already queued before drawing —
                     # held keys repeating faster than a frame renders
@@ -5746,7 +5766,16 @@ class App:
                     drained += 1
                     k = self.read_key(0) if drained < 64 else None
                 t0 = time.perf_counter()
-                self.render()
+                try:
+                    self.render()
+                except Exception as e:
+                    # a single bad frame (resize race, transient numpy/art
+                    # edge) is logged and skipped — the app keeps running
+                    crash_log("render", e)
+                    self._fault_n = getattr(self, "_fault_n", 0) + 1
+                    if self._fault_n > 200:   # a persistent fault → bail
+                        raise
+                    time.sleep(0.05)
                 self._frame_cost = time.perf_counter() - t0
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
@@ -6544,7 +6573,17 @@ def main():
     if respawn_pure():
         sys.exit(0)
     rename_notice()
-    App(ao=args.ao).run()
+    # background threads die quietly otherwise — log them
+    threading.excepthook = lambda a: crash_log(
+        "thread:" + getattr(a.thread, "name", "?"), a.exc_value)
+    try:
+        App(ao=args.ao).run()
+    except Exception as e:
+        crash_log("fatal", e)
+        # terminal's already restored by run()'s finally; surface it
+        print("nocturne crashed — logged to", CRASH_LOG)
+        print("  last error:", type(e).__name__, e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
