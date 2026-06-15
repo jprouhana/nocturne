@@ -198,11 +198,35 @@ def char_w(ch):
     # clipped durations)
     if unicodedata.combining(ch) or ch in "\u200b\u200c\u200d\ufe0e\ufe0f\u200e\u200f":
         return 0
-    return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+    if unicodedata.east_asian_width(ch) in "WF":
+        return 2
+    o = ord(ch)
+    # supplementary-plane pictographs (\ud83c\udff9\ud83d\udd25\ud83c\udfb5\ud83d\udc80\u2026) render two cells in
+    # ghostty's unicode width method even where EAW under-reports them
+    if 0x1F000 <= o <= 0x1FAFF:
+        return 2
+    return 1
+
+
+def str_w(s):
+    """Visible width under ghostty's unicode method \u2014 like summing
+    char_w, but VS16 (U+FE0F) promotes its base symbol to emoji
+    presentation = two cells (\u2764\ufe0f \u2600\ufe0f \u2b50\ufe0f render wide)."""
+    w, prev1 = 0, False
+    for ch in s:
+        if ch == "\ufe0f":           # emoji variation selector
+            if prev1:
+                w += 1               # the base char's second cell
+                prev1 = False
+            continue
+        cw = char_w(ch)
+        w += cw
+        prev1 = cw == 1
+    return w
 
 
 def visible_len(s):
-    return sum(char_w(ch) for ch in ANSI_RE.sub("", s))
+    return str_w(ANSI_RE.sub("", s))
 
 
 def crop_pad(s, w):
@@ -214,10 +238,17 @@ def crop_pad(s, w):
             out.append(m.group())
             i = m.end()
             continue
-        cw = char_w(s[i])
+        ch = s[i]
+        if ch == "️" and out:        # VS16: its base is emoji-wide
+            out.append(ch)
+            if vis < w:
+                vis += 1               # the base's promoted second cell
+            i += 1
+            continue
+        cw = char_w(ch)
         if vis + cw > w:
             break
-        out.append(s[i])
+        out.append(ch)
         vis += cw
         i += 1
     out.append(RESET)
@@ -245,6 +276,10 @@ def ansi_cells(s, w):
             # the heart splash shift one cell per mark on that row)
             sgr, prev = cells[-1]
             cells[-1] = (sgr, prev + ch)
+            # VS16 turns its base symbol into emoji presentation = 2 cells
+            if ch == "️" and prev and char_w(prev[0]) == 1 \
+                    and len(cells) < w:
+                cells.append((sgr, ""))
             i += 1
             continue
         cells.append((cur, ch))
