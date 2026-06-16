@@ -905,6 +905,9 @@ class Player:
     def seek(self, secs):
         self.cmd("seek", secs, "relative")
 
+    def seek_to(self, pos):
+        self.cmd("seek", pos, "absolute")
+
     def add_volume(self, d):
         v = max(0, min(130, (self.props.get("volume") or 70) + d))
         self.cmd("set_property", "volume", v)
@@ -2827,6 +2830,58 @@ class App:
         except Exception:
             return {}
 
+    def _save_session(self):
+        """A one-shot snapshot for the fat reload (Z): the whole queue,
+        where you are in it, the second you're at, and the view — so a
+        relaunch (to pick up new code) drops you right back in."""
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            sess = {
+                "ts": time.time(),
+                "queue": [dataclasses.asdict(t) for t in self.queue],
+                "qpos": self.qpos,
+                "pos": self.player.props.get("time-pos") or 0,
+                "paused": bool(self.player.props.get("pause")),
+                "tab": self.tab, "sel": self.sel, "scroll": self.scroll,
+                "pl_open": (dataclasses.asdict(self.pl_open)
+                            if self.pl_open else None),
+                "pl_tracks": [dataclasses.asdict(t) for t in self.pl_tracks],
+            }
+            with open(os.path.join(CONFIG_DIR, "session.json"), "w") as f:
+                json.dump(sess, f)
+        except Exception:
+            pass
+
+    def _resume_session(self):
+        """If a fresh fat-reload snapshot is waiting, restore it once and
+        delete it (so a normal restart doesn't keep auto-resuming)."""
+        p = os.path.join(CONFIG_DIR, "session.json")
+        try:
+            with open(p) as f:
+                s = json.load(f)
+            os.unlink(p)
+        except Exception:
+            return
+        if time.time() - s.get("ts", 0) > 3600:    # stale → ignore
+            return
+        try:
+            self.queue = [Track(**t) for t in s.get("queue", [])]
+            self.tab = s.get("tab", 0)
+            self.sel = s.get("sel", self.sel)
+            self.scroll = s.get("scroll", self.scroll)
+            if s.get("pl_open"):
+                self.pl_open = Playlist(**s["pl_open"])
+                self.pl_tracks = [Track(**t) for t in s.get("pl_tracks", [])]
+            qpos = s.get("qpos", -1)
+            if self.queue and 0 <= qpos < len(self.queue):
+                self.play_queue(qpos)
+                self._seek_to = s.get("pos", 0)        # applied once loaded
+                if s.get("paused"):
+                    self._resume_pause = True
+            self.say("⟳ picked up right where you left off")
+        except Exception:
+            pass
+
     def _save_state(self):
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -3776,6 +3831,12 @@ class App:
             self.like_current()
         elif k == "Y":
             self._merge_likes()
+        elif k == "Z":
+            # fat reload: relaunch in place and resume the run
+            self.say("⟳ reloading — back in a sec, right where you are")
+            self.render()
+            self._reload = True
+            self.running = False
         elif k == "S":
             cyc = ("all", "yt", "sc")
             self.src_filter = cyc[
@@ -4234,6 +4295,7 @@ class App:
                      ("M", "tuning menu"), ("[ ]", "beat punch"),
                      ("{ }", "flow speed"), ("w", "work mode")]),
         ("WORLD", [("tab 1-4", "switch view"), ("j k", "move"),
+                   ("Z", "reload (resume here)"),
                    ("S", "all / yt / ☁"), ("esc / h", "back out"),
                    ("?", "this box"), ("q", "quit")]),
     ]
@@ -5777,7 +5839,17 @@ class App:
             termios.tcsetattr(fd, termios.TCSANOW, attrs)
             self._query_cellpx(fd)
             self._query_emoji_w(fd)
+            self._resume_session()
             while self.running:
+                # fat-reload resume: once the track is actually playing,
+                # jump to the saved second (and honor a saved pause)
+                if getattr(self, "_seek_to", 0) and \
+                        self.player.props.get("time-pos") is not None:
+                    self.player.seek_to(self._seek_to)
+                    if getattr(self, "_resume_pause", False):
+                        self.player.cmd("set_property", "pause", True)
+                        self._resume_pause = False
+                    self._seek_to = 0
                 if self.eof_flag.is_set():
                     self.eof_flag.clear()
                     # loop track replays on the NATURAL end only —
@@ -5859,6 +5931,8 @@ class App:
                     time.sleep(0.05)
                 self._frame_cost = time.perf_counter() - t0
         finally:
+            if getattr(self, "_reload", False):
+                self._save_session()   # snapshot BEFORE tearing playback down
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
             if self._kitty_ok:
                 sys.stdout.write("\x1b_Ga=d,d=A,q=2\x1b\\")
@@ -5874,6 +5948,13 @@ class App:
             self._write_now()
             self.tap.stop()
             self.player.quit()
+            if getattr(self, "_reload", False):
+                # relaunch in place (same window) — picks up new code and
+                # the session snapshot resumes the run. terminal's already
+                # restored, mpv's down; execv replaces this process.
+                os.execv(sys.executable,
+                         [sys.executable, os.path.abspath(__file__)]
+                         + sys.argv[1:])
 
 
 # ──────────────────────────────────────────────────────────────────────────────
