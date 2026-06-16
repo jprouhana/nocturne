@@ -191,6 +191,17 @@ def grad_text(text, c1, c2):
     return "".join(out) + RESET
 
 
+# emoji cell width is terminal/font-dependent: ghostty + a Nerd Font
+# often draws emoji in ONE cell while Unicode EAW says two. nocturne
+# measures the real width at startup (_query_emoji_w) and stores it here.
+EMOJI_W = 2
+
+
+def _is_emoji(o):
+    return (0x1F000 <= o <= 0x1FAFF or 0x2600 <= o <= 0x27BF
+            or 0x2B00 <= o <= 0x2BFF or o in (0x2764, 0x2665))
+
+
 def char_w(ch):
     # zero-width: combining accents (гу́би), variation selectors (💋️),
     # zero-width (non-)joiners — terminals draw them as 0 cells; counting
@@ -198,12 +209,12 @@ def char_w(ch):
     # clipped durations)
     if unicodedata.combining(ch) or ch in "\u200b\u200c\u200d\ufe0e\ufe0f\u200e\u200f":
         return 0
-    if unicodedata.east_asian_width(ch) in "WF":
-        return 2
     o = ord(ch)
-    # supplementary-plane pictographs (\ud83c\udff9\ud83d\udd25\ud83c\udfb5\ud83d\udc80\u2026) render two cells in
-    # ghostty's unicode width method even where EAW under-reports them
+    # supplementary-plane pictographs (\ud83c\udff9\ud83c\udfb5\ud83d\udc8b\u2026): the MEASURED width \u2014
+    # ghostty+NerdFont often draws these one cell, not the EAW-implied two
     if 0x1F000 <= o <= 0x1FAFF:
+        return EMOJI_W
+    if unicodedata.east_asian_width(ch) in "WF":   # true CJK, fullwidth
         return 2
     return 1
 
@@ -212,16 +223,16 @@ def str_w(s):
     """Visible width under ghostty's unicode method \u2014 like summing
     char_w, but VS16 (U+FE0F) promotes its base symbol to emoji
     presentation = two cells (\u2764\ufe0f \u2600\ufe0f \u2b50\ufe0f render wide)."""
-    w, prev1 = 0, False
+    w, prevbase = 0, False
     for ch in s:
-        if ch == "\ufe0f":           # emoji variation selector
-            if prev1:
-                w += 1               # the base char's second cell
-                prev1 = False
+        if ch == "\ufe0f":               # emoji variation selector (VS16)
+            if prevbase:
+                w += EMOJI_W - 1         # promote the base to emoji width
+                prevbase = False
             continue
         cw = char_w(ch)
         w += cw
-        prev1 = cw == 1
+        prevbase = cw == 1 and _is_emoji(ord(ch))
     return w
 
 
@@ -239,10 +250,10 @@ def crop_pad(s, w):
             i = m.end()
             continue
         ch = s[i]
-        if ch == "️" and out:        # VS16: its base is emoji-wide
+        if ch == "️" and out:        # VS16: base becomes emoji presentation
             out.append(ch)
             if vis < w:
-                vis += 1               # the base's promoted second cell
+                vis += EMOJI_W - 1     # promote a width-1 base to emoji width
             i += 1
             continue
         cw = char_w(ch)
@@ -276,9 +287,10 @@ def ansi_cells(s, w):
             # the heart splash shift one cell per mark on that row)
             sgr, prev = cells[-1]
             cells[-1] = (sgr, prev + ch)
-            # VS16 turns its base symbol into emoji presentation = 2 cells
-            if ch == "️" and prev and char_w(prev[0]) == 1 \
-                    and len(cells) < w:
+            # VS16 turns its base symbol into emoji presentation: if the
+            # terminal draws emoji 2-wide, the width-1 base gains a cell
+            if ch == "️" and EMOJI_W == 2 and prev \
+                    and char_w(prev[0]) == 1 and len(cells) < w:
                 cells.append((sgr, ""))
             i += 1
             continue
@@ -5193,6 +5205,33 @@ class App:
         except Exception:
             pass
 
+    def _query_emoji_w(self, fd):
+        """Measure how many cells the terminal advances for an emoji —
+        ghostty + a Nerd Font often draws them single-width while Unicode
+        says two, which drifts every title with one. Print one on the
+        last row, ask the cursor where it landed, clear it. Default 2
+        survives if there's no reply."""
+        global EMOJI_W
+        try:
+            sys.stdout.write("\x1b[9999;1H\r\U0001F3B5\x1b[6n")
+            sys.stdout.flush()
+            buf, end = "", time.time() + 0.25
+            while time.time() < end:
+                r, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if not r:
+                    continue
+                buf += os.read(fd, 32).decode("ascii", "ignore")
+                m = re.search(r"\x1b\[\d+;(\d+)R", buf)
+                if m:
+                    adv = int(m.group(1)) - 1
+                    if adv in (1, 2):
+                        EMOJI_W = adv
+                    break
+            sys.stdout.write("\x1b[9999;1H\r  \r")
+            sys.stdout.flush()
+        except Exception:
+            pass
+
     def _drop_kitty(self, idxf, Wpx, Hpx, W, rows, pad, bright, w):
         """Blit the field as a true RGB bitmap (kitty graphics protocol).
         The image is transmitted after the text frame; here we just leave
@@ -5737,6 +5776,7 @@ class App:
             attrs[1] |= termios.OPOST | termios.ONLCR
             termios.tcsetattr(fd, termios.TCSANOW, attrs)
             self._query_cellpx(fd)
+            self._query_emoji_w(fd)
             while self.running:
                 if self.eof_flag.is_set():
                     self.eof_flag.clear()
