@@ -5325,6 +5325,8 @@ class App:
         self._drop_bass_avg = self._drop_bass_avg * 0.985 + rb * 0.015
         avg = self._drop_bass_avg
         last = getattr(self, "_beat_t", 0.0)
+        if now < last:            # wall clock jumped backwards (common under WSL) — resync
+            self._beat_t = last = now
         if rb > avg * 1.45 + 0.06 and now - last > 0.22:
             gaps = getattr(self, "_beat_gaps", [])
             if last and 0.25 < now - last < 2.0:
@@ -5333,7 +5335,7 @@ class App:
             self._beat_t = now
             self._beat_amp = min(1.0, 0.45 + (rb - avg) * 2.0)
             last = now
-        pulse = getattr(self, "_beat_amp", 0.0) * math.exp(-(now - last) / 0.42)
+        pulse = getattr(self, "_beat_amp", 0.0) * math.exp(-max(0.0, now - last) / 0.42)
         groove = 0.0
         gaps = getattr(self, "_beat_gaps", [])
         if len(gaps) >= 4:                     # tempo locked — keep bobbing
@@ -5347,15 +5349,19 @@ class App:
         tavg = getattr(self, "_drop_tre_avg", 0.12) * 0.985 + rt * 0.015
         self._drop_mid_avg, self._drop_tre_avg = mavg, tavg
         mlast = getattr(self, "_mid_t", 0.0)
+        if now < mlast:           # backward clock jump (WSL) — resync
+            self._mid_t = mlast = now
         if rm > mavg * 1.5 + 0.05 and now - mlast > 0.18:
             self._mid_t = mlast = now
             self._mid_amp = min(1.0, 0.4 + (rm - mavg) * 2.2)
-        mpul = getattr(self, "_mid_amp", 0.0) * math.exp(-(now - mlast) / 0.30)
+        mpul = getattr(self, "_mid_amp", 0.0) * math.exp(-max(0.0, now - mlast) / 0.30)
         tlast = getattr(self, "_tre_t", 0.0)
+        if now < tlast:           # backward clock jump (WSL) — resync
+            self._tre_t = tlast = now
         if rt > tavg * 1.55 + 0.04 and now - tlast > 0.09:
             self._tre_t = tlast = now
             self._tre_amp = min(1.0, 0.35 + (rt - tavg) * 2.5)
-        tpul = getattr(self, "_tre_amp", 0.0) * math.exp(-(now - tlast) / 0.15)
+        tpul = getattr(self, "_tre_amp", 0.0) * math.exp(-max(0.0, now - tlast) / 0.15)
         eb, em, et = self._drop_e
         en = getattr(self, "_drop_energy", 0.2)
         en += ((eb + em + et) / 3 - en) * min(1.0, dt * 1.2)

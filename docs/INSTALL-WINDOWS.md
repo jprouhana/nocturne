@@ -9,9 +9,9 @@ first time. None of it is hard — you mostly copy a line, paste it, press Enter
 and wait. There's a restart in the middle. After this, opening the player is
 two clicks.
 
-You'll need: a Windows 10 or 11 computer, and to be logged into
-**music.youtube.com in Firefox** at some point (for your playlists — but you
-can skip that and still play any song).
+You'll need: a Windows 10 or 11 computer, and (optional) to be logged into
+**music.youtube.com** in your normal browser — that's only for pulling *your*
+playlists and liked songs. You can skip it and still search and play anything.
 
 A note on the copy/paste lines below: to **paste** into the black window, click
 it once and press **Ctrl+Shift+V** (or just right-click). Normal Ctrl+V doesn't
@@ -75,12 +75,36 @@ cd ~/ytm-tui
 
 The installer sets everything up and at the end asks **"sign in now? [Y/n]"**.
 
-- To get **your** playlists and liked songs: first make sure you're **logged
-  into music.youtube.com in Firefox on Windows**, then press **Y** and Enter,
-  and choose **1) firefox**. It finds your login automatically.
-- Don't care about that / not using Firefox? Just press **n**. You can still
-  search and play any song. (You can sign in later anytime by typing
-  `ytm --login`.)
+You don't need to sign in to search and play music — press **n** and you're
+done. Sign in only if you want **your** playlists and liked songs (you can
+always do it later with `ytm --login`).
+
+> **Important on Windows:** the "read my browser automatically" option can't
+> see a browser that's installed on the Windows side — so on WSL you sign in by
+> pasting one request from your browser. It sounds technical but takes about a
+> minute.
+
+If you want your library, press **Y**, choose **2) paste request headers**, and
+follow along:
+
+1. In your browser, open **music.youtube.com** (signed in) and click around
+   once — e.g. open your **Library** — so the page loads fresh.
+2. Press **F12** to open developer tools → click the **Network** tab → type
+   `browse` in the filter box → click any **browse** row that appears in the
+   list. (If the list is empty, click around the page again — it only records
+   while it's open.)
+3. Copy that request's headers as plain text:
+   - **Firefox:** right-click the row → **Copy → Copy Request Headers**.
+   - **Chrome / Edge:** in the panel on the right, open the **Headers** tab,
+     scroll to the **Request Headers** section, and flip its little **Raw**
+     toggle **on** — the text changes to `name: value` lines. Select all of it
+     (click in, **Ctrl+A**) and **Ctrl+C**. (Newer Chrome removed the old
+     one-click "Copy request headers", so the Raw toggle is the way.)
+4. Back in the Ubuntu window, paste (**Ctrl+Shift+V**), press **Enter**, then
+   press **Ctrl+D** on the empty line. It confirms "signed in".
+
+Prefer not to copy cookies at all? Choose **3) Google sign-in** instead and
+approve a code — a few more clicks, but it never touches your browser files.
 
 ---
 
@@ -103,6 +127,31 @@ The full list of keys is along the bottom of the window and in the main
 
 ---
 
+## Optional — the full-quality visualizer
+
+The player works fine in the default Ubuntu window, but you'll get the
+block-character visualizer. Nocturne also has a **true pixel** visualizer —
+crisp album art and a smooth plasma drawn as real pixels — that only appears in
+a GPU terminal which speaks the "kitty graphics protocol". The easiest one on
+Windows is **WezTerm**.
+
+1. In the Ubuntu window, install it (this installs on the Windows side):
+   ```sh
+   winget.exe install --id wez.wezterm -e
+   ```
+   Click **Yes** if Windows asks. When it finishes, open **WezTerm** from the
+   Start menu.
+2. WezTerm opens a normal Windows shell. To get your Linux window, click the
+   small **˅** arrow at the top-right and pick **Ubuntu** (WezTerm finds your
+   WSL automatically).
+3. In that tab, type `ytm`, press Enter, then press **p** to switch into pixel
+   mode.
+
+Run `ytm --doctor` any time — it tells you whether your current terminal
+qualifies for the pixel renderer.
+
+---
+
 ## If something goes wrong
 
 - **"ytm: command not found"** — close the Ubuntu window and open a fresh one,
@@ -113,9 +162,12 @@ The full list of keys is along the bottom of the window and in the main
   in Part 2 (the `sudo apt install` one), let it finish, then `cd ~/ytm-tui`
   and `./install.sh` again.
 
-- **Sign-in couldn't find your login** — make sure you actually logged into
-  **music.youtube.com** (not just youtube.com) **in Firefox**, leave that tab
-  open, then run `ytm --login` and pick firefox again.
+- **Sign-in couldn't find your login** — on Windows the automatic "read my
+  browser" option doesn't work, because your browser lives on the Windows side,
+  out of reach of the Linux player. Use the **paste request headers** method
+  from Part 2 instead (works with any browser), or the **Google sign-in**
+  option. Re-run it any time with `ytm --login`. And make sure you logged into
+  **music.youtube.com** (not just youtube.com).
 
 - **The music plays but the visualizer bars don't dance** — Windows' Linux
   layer sometimes can't "hear" the audio for the spectrum. The player notices
