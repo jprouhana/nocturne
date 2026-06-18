@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 CONFIG_DIR = os.path.expanduser("~/.config/ytm-tui")
 CACHE_DIR = os.path.expanduser("~/.cache/nocturne")
 ART_CACHE_DIR = os.path.join(CACHE_DIR, "art")
+LYRICS_CACHE_DIR = os.path.join(CACHE_DIR, "lyrics")
 CRASH_LOG = os.path.join(CACHE_DIR, "crash.log")
 
 
@@ -351,6 +352,164 @@ def fmt_time(secs):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# lyrics — LRCLIB (free, no key, synced LRC) with a disk cache
+# ──────────────────────────────────────────────────────────────────────────────
+
+_LRC_TS = re.compile(r"\[(\d{1,2}):(\d{1,2}(?:\.\d{1,3})?)\]")
+# slowed/reverb/edit noise — LRCLIB only has the originals, so strip it to match
+_LYR_NOISE = re.compile(
+    r"\b(slowed|sped\s*up|reverb|reverbed|bass\s*boosted|nightcore|8d\s*audio|"
+    r"tiktok|remix|bootleg|mashup|cover|lyrics|lyric|audio|official|video|"
+    r"visualizer|hq|hd|remaster(?:ed)?|extended|edit|version|feat\.?|ft\.?)\b",
+    re.I)
+
+
+def _lyr_secs(dur):
+    """'3:24' / '1:02:03' -> seconds (0 if unparseable)."""
+    try:
+        p = [int(x) for x in str(dur).split(":")]
+    except ValueError:
+        return 0
+    if len(p) == 2:
+        return p[0] * 60 + p[1]
+    if len(p) == 3:
+        return p[0] * 3600 + p[1] * 60 + p[2]
+    return 0
+
+
+def _lyr_clean(s):
+    s = re.sub(r"[\(\[\{].*?[\)\]\}]", " ", s)      # drop (slowed + reverb) etc
+    s = _LYR_NOISE.sub(" ", s)
+    s = re.sub(r"[-–—|]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def parse_lrc(text):
+    """LRC string -> sorted [(seconds, line)]. Untimed plain text becomes
+    a single -1 stamp per line so it still scrolls, just without sync."""
+    timed, plain = [], []
+    for raw in text.splitlines():
+        stamps = list(_LRC_TS.finditer(raw))
+        body = _LRC_TS.sub("", raw).strip()
+        if stamps:
+            for m in stamps:
+                timed.append((int(m.group(1)) * 60 + float(m.group(2)), body))
+        elif raw.strip():
+            plain.append((-1.0, raw.strip()))
+    if timed:
+        timed.sort(key=lambda x: x[0])
+        return timed
+    return plain
+
+
+def lyrics_cache_path(vid):
+    import hashlib
+    try:
+        os.makedirs(LYRICS_CACHE_DIR, exist_ok=True)
+    except OSError:
+        pass
+    key = hashlib.sha1(vid.encode("utf-8", "ignore")).hexdigest()
+    return os.path.join(LYRICS_CACHE_DIR, key + ".lrc")
+
+
+def lines_to_lrc(lines):
+    """[(sec, text)] (sec<0 = unsynced) -> LRC/plain text for the cache."""
+    out = []
+    for t, txt in lines:
+        if t is None or t < 0:
+            out.append(txt)
+        else:
+            out.append("[%02d:%05.2f]%s" % (int(t // 60), t % 60, txt))
+    return "\n".join(out)
+
+
+def lrclib_text(track, timeout=4):
+    """Raw LRC/plain text from LRCLIB. Returns (text, reached) — `reached`
+    is True only if the API actually answered, so a network blip never gets
+    mistaken for a real 'no lyrics'. Uses /api/search ONLY — never /api/get,
+    which hits external sources and stalls a TUI for 5-10s."""
+    import urllib.parse
+    title = _lyr_clean(track.title)
+    artist = _lyr_clean(track.artist.split(",")[0])
+    secs = _lyr_secs(track.duration)
+    if not title:
+        return "", False
+    url = "https://lrclib.net/api/search?" + urllib.parse.urlencode(
+        {"track_name": title, "artist_name": artist})
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "nocturne (https://github.com/jprouhana/nocturne)"})
+        records = json.load(urllib.request.urlopen(req, timeout=timeout))
+    except Exception:
+        return "", False                     # network blip — caller retries
+    if not isinstance(records, list):
+        return "", True
+    # prefer a duration-matched synced record, then any synced, then plain
+    best = next((r for r in records if r.get("syncedLyrics") and secs
+                 and abs((r.get("duration") or 0) - secs) <= 3), None) \
+        or next((r for r in records if r.get("syncedLyrics")), None) \
+        or (records[0] if records else {})
+    found = (best.get("syncedLyrics") or best.get("plainLyrics") or "").strip()
+    return found, True
+
+
+def lrclib_synced(track, timeout=3):
+    """LRCLIB synced lyrics, timed to THIS recording. Uses /api/search
+    (internal DB, fast) NOT /api/get (external sources, 5-10s stalls). LRCLIB
+    often holds SEVERAL records per song at different lengths (album/extended/
+    snippet) — we pick the SYNCED one whose duration is CLOSEST to the track
+    and within ±4s, so the timestamps actually line up (a slowed/sped edit has
+    a wildly different length and is rejected). Best-effort: [] on miss/blip."""
+    import urllib.parse
+    title = _lyr_clean(track.title)
+    artist = _lyr_clean(track.artist.split(",")[0])
+    secs = _lyr_secs(track.duration)
+    if not title or not secs:
+        return []
+    url = "https://lrclib.net/api/search?" + urllib.parse.urlencode(
+        {"track_name": title, "artist_name": artist})
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "nocturne (https://github.com/jprouhana/nocturne)"})
+        records = json.load(urllib.request.urlopen(req, timeout=timeout))
+    except Exception:
+        return []
+    if not isinstance(records, list):
+        return []
+    # closest-duration synced record wins — NOT just the first listed (LRCLIB
+    # returned a 740s and a 480s "Cinderella"; only the 480s matches an 8:01)
+    cands = [(abs((r.get("duration") or 0) - secs), r) for r in records
+             if (r.get("syncedLyrics") or "").strip() and r.get("duration")]
+    cands = [c for c in cands if c[0] <= 4]
+    cands.sort(key=lambda c: c[0])
+    for _, rec in cands:
+        lines = parse_lrc(rec["syncedLyrics"])
+        if lines and lines[0][0] >= 0:
+            return lines
+    return []
+
+
+def fetch_lyrics(track, timeout=5):
+    """Standalone (no yt client): LRCLIB only, disk-cached. The app uses
+    its own _get_lyrics which tries YouTube Music's native lyrics first."""
+    path = lyrics_cache_path(track.video_id)
+    try:
+        with open(path, encoding="utf-8") as f:
+            cached = f.read()
+        return parse_lrc(cached) if cached.strip() != "\x00" else []
+    except OSError:
+        pass
+    found, reached = lrclib_text(track, timeout)
+    if found or reached:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(found or "\x00")
+        except OSError:
+            pass
+    return parse_lrc(found) if found else []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # data
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -364,6 +523,7 @@ class Track:
     thumb: str = ""
     set_video_id: str = ""   # playlist membership id, needed for removal
     stream_hint: str = ""    # sc: transcoding endpoints + auth (json)
+    video_type: str = ""     # ytm MUSIC_VIDEO_TYPE_* — ATV/OMV official, UGC upload
 
     @property
     def source(self):
@@ -387,7 +547,8 @@ class Track:
             thumbs = thumbs.get("thumbnails", [])
         thumb = thumbs[-1]["url"] if thumbs else ""
         return cls(vid, title, artist, album, dur, thumb,
-                   it.get("setVideoId") or "")
+                   it.get("setVideoId") or "", "",
+                   it.get("videoType") or "")
 
 
 @dataclass
@@ -2798,6 +2959,9 @@ class App:
         self.full = False
         self.viz_max = False      # F: visualizer owns the whole terminal
         self.liked_now = False
+        self.lyrics_on = False    # g: synced lyrics in place of the viz
+        self._lyrics = {}         # video_id -> [(sec,line)] | [] | "..."
+        self._aligning = None     # video_id being force-aligned (G), or None
         self.input_mode = False
         self.input_buf = ""
         self.input_purpose = "search"
@@ -3858,6 +4022,14 @@ class App:
             self.viz_style = VIZ_STYLES[(i + 1) % len(VIZ_STYLES)]
             self.bars = []          # reset physics for the new style
             self.say(f"visualizer: {self.viz_style}")
+        elif k == "g":
+            self.lyrics_on = not self.lyrics_on
+            if self.lyrics_on and self.now:
+                self._get_lyrics(self.now)     # warm the fetch
+            self.say("lyrics on — G to align to this audio"
+                     if self.lyrics_on else "lyrics off")
+        elif k == "G":
+            self._align_lyrics()
         elif k == "w":
             self.work = not self.work
             self.say("work mode — art hidden" if self.work
@@ -4290,6 +4462,7 @@ class App:
                   ("A", "→ playlist"), ("N", "new playlist"),
                   ("x", "remove"), ("D D", "delete playlist")]),
         ("VISUALS", [("v", "visualizer"), ("c", "theme"),
+                     ("g", "lyrics (synced)"), ("G", "align to audio (AI)"),
                      ("p", "pixel quality"), ("t", "art overlay"),
                      ("F", "max visualizer"), ("f", "fullscreen"),
                      ("M", "tuning menu"), ("[ ]", "beat punch"),
@@ -4431,6 +4604,264 @@ class App:
         lines.append(self._render_footer(w))
         return lines
 
+    def _align_lyrics(self):
+        """G: force-align the lyrics to THIS track's real audio (via
+        faster-whisper) → an LRC timed to the exact recording. Perfect sync
+        even for a slowed/non-official upload. Runs in the background (~15s);
+        the result overwrites the disk cache so it's instant next time and
+        survives restarts. If no lyrics are loaded (a slowed edit YTM/LRCLIB
+        couldn't time-match), grab the ORIGINAL song's WORDS leniently — the
+        alignment supplies the timing, so the duration mismatch doesn't matter."""
+        if not self.now or self.now.source != "yt":
+            self.say("alignment needs a YouTube track (not ☁)")
+            return
+        if self._aligning:
+            self.say("already aligning a track — one at a time")
+            return
+        track = self.now
+        vid = track.video_id
+        out = lyrics_cache_path(vid)
+        self._aligning = vid
+        self.say("⟁ aligning lyrics to this audio — ~15s, keep listening")
+
+        def _go():
+            tf = None
+            try:
+                cur = self._lyrics.get(vid)
+                if not isinstance(cur, list) or len(cur) < 2:
+                    cur = self._yt_lyrics(track, lenient=True) if self.yt else []
+                if not isinstance(cur, list) or len(cur) < 2:
+                    self.say("no lyrics found anywhere to align this one")
+                    return
+                text = "\n".join(t for _, t in cur if t.strip())
+                tf = tempfile.NamedTemporaryFile(
+                    "w", suffix=".txt", delete=False, encoding="utf-8")
+                tf.write(text)
+                tf.close()
+                r = subprocess.run(
+                    ["nocturne-align", "--audio", vid,
+                     "--lyrics-file", tf.name, "--out", out],
+                    capture_output=True, text=True, timeout=420)
+                if r.returncode == 0:
+                    with open(out, encoding="utf-8") as f:
+                        aligned = parse_lrc(f.read())
+                    if aligned:
+                        self._lyrics[vid] = aligned
+                        self.say("✓ lyrics aligned to this recording")
+                    else:
+                        self.say("alignment produced nothing usable")
+                else:
+                    crash_log("align", Exception((r.stderr or "")[-500:]))
+                    self.say("align failed — "
+                             + ((r.stderr or "").strip().splitlines() or
+                                ["see crash.log"])[-1][:60])
+            except subprocess.TimeoutExpired:
+                self.say("alignment timed out")
+            except Exception as e:
+                crash_log("align", e)
+                self.say("alignment error (see crash.log)")
+            finally:
+                if tf is not None:
+                    try:
+                        os.unlink(tf.name)
+                    except OSError:
+                        pass
+                self._aligning = None
+        threading.Thread(target=_go, daemon=True).start()
+
+    def _yt_lyrics_for(self, vid):
+        """Plain YTM lyrics for one exact videoId, or [] if it has none.
+        Plain only: synced (timestamps=True) needs a mobile client cookie auth
+        can't reach (HTTP 400) — and most of his library is slowed/reverb,
+        where the original's timestamps would be wrong anyway."""
+        try:
+            wp = self.yt.get_watch_playlist(videoId=vid, limit=1)
+            bid = (wp or {}).get("lyrics")
+            if not bid:
+                return []
+            data = self.yt.get_lyrics(bid)
+        except Exception:
+            return []
+        lyr = (data or {}).get("lyrics")
+        if not isinstance(lyr, str):
+            return []
+        return [(-1.0, ln.strip()) for ln in lyr.splitlines() if ln.strip()]
+
+    def _yt_lyrics(self, track, lenient=False):
+        """YTM lyrics for a track. His library entries are often a video/upload
+        whose own videoId carries NO lyrics browseId — so if the exact id is
+        dry, search YTM for the actual SONG and use ITS lyrics. Guarded TWO
+        ways so a one-word title can't grab the wrong song's words: a fuzzy
+        title+artist score AND a duration match (a mistagged video version is
+        the same length as the song; a slowed/extended bootleg is not).
+        `lenient` DROPS the duration gate — used when force-aligning, where we
+        only need the right WORDS (the slowed audio gets its own timing)."""
+        lines = self._yt_lyrics_for(track.video_id)
+        if lines:
+            return lines
+        my_secs = _lyr_secs(track.duration)
+        # lenient (alignment): the artist is often a junk uploader tag, so
+        # search on the title alone — it carries "real-artist - song"
+        q = _lyr_clean(track.title)
+        if not lenient:
+            q += " " + _lyr_clean(track.artist.split(",")[0])
+        try:
+            results = self.yt.search(q, limit=5)
+        except Exception:
+            return []
+        best, best_s = None, 0.0
+        # slowed/edit uploads stuff the real artist INTO the title ("marshmello
+        # - alone") and leave a junk artist tag — so lenient mode scores on the
+        # combined title+artist token set, which still pins the right song
+        mine = _sync_tokens(track.title)        # title holds "artist - song"
+        for r in results:
+            if r.get("resultType") != "song" or not r.get("videoId"):
+                continue
+            rsecs = r.get("duration_seconds") or 0
+            if not lenient and my_secs and rsecs and abs(rsecs - my_secs) > 12:
+                continue                     # different length = not this song
+            ra = ", ".join(a.get("name", "") for a in (r.get("artists") or []))
+            if lenient:
+                theirs = _sync_tokens(r.get("title", "") + " " + ra)
+                s = (len(mine & theirs) / len(mine | theirs)
+                     if mine and theirs else 0.0)
+            else:
+                s = _sync_score(track.title, track.artist, r.get("title", ""), ra)
+            if s > best_s:
+                best, best_s = r["videoId"], s
+        if best and best_s >= (0.4 if lenient else 0.5) and best != track.video_id:
+            return self._yt_lyrics_for(best)
+        return []
+
+    def _get_lyrics(self, track):
+        """Lyrics for a track: cached list, or None while a background fetch
+        runs. Kicks the fetch off once per id. Pipeline (all in the bg thread,
+        result disk-cached as LRC):
+          1. YouTube Music's own lyrics for the video — fast, exact, RELIABLE,
+             with a search-the-song fallback. This is the base, shown ASAP.
+          2. A tight LRCLIB /api/search upgrade to SYNCED (duration-matched),
+             best-effort — if it answers in time it replaces the plain text
+             with scrolling timestamps; if it stalls or misses, the plain
+             lyrics already on screen stand. LRCLIB never blocks display."""
+        vid = track.video_id
+        cur = self._lyrics.get(vid)
+        if cur is not None:
+            return None if cur == "..." else cur
+        self._lyrics[vid] = "..."
+
+        def _go():
+            lines = []
+            try:
+                path = lyrics_cache_path(vid)
+                cached_plain = False
+                try:                                       # warm start from disk
+                    with open(path, encoding="utf-8") as f:
+                        cached = f.read()
+                    if cached.strip() == "\x00":
+                        self._lyrics[vid] = []
+                        return                             # cached "no lyrics"
+                    lines = parse_lrc(cached)
+                    self._lyrics[vid] = lines              # show cached NOW
+                    if lines and lines[0][0] >= 0:
+                        return                             # already SYNCED — done
+                    cached_plain = True                    # plain → try to sync
+                except OSError:
+                    pass
+                if not lines and track.source == "yt" and self.yt:
+                    lines = self._yt_lyrics(track)         # exact, then search
+                    if lines:
+                        self._lyrics[vid] = lines          # show plain NOW
+                # only AUTO-sync from LRCLIB for the canonical release — a UGC
+                # upload's audio won't match any record's timing (confidently
+                # wrong is worse than honest plain; G force-aligns those)
+                is_upload = track.video_type == "MUSIC_VIDEO_TYPE_UGC"
+                if (lines or cached_plain) and not is_upload:
+                    synced = lrclib_synced(track, timeout=6)   # try to upgrade
+                    if synced:                                 # to real sync
+                        lines = synced
+                        self._lyrics[vid] = synced
+                elif not lines:                            # nothing from YTM —
+                    text, reached = lrclib_text(track)     # LRCLIB plain fallback
+                    lines = parse_lrc(text) if text else []
+                    if not (text or reached):
+                        self._lyrics[vid] = lines           # blip: don't cache
+                        return
+                try:                                       # cache the best answer
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(lines_to_lrc(lines) if lines else "\x00")
+                except OSError:
+                    pass
+            except Exception as e:
+                crash_log("get_lyrics", e)
+            self._lyrics[vid] = lines
+        threading.Thread(target=_go, daemon=True).start()
+        return None
+
+    def _render_lyrics(self, w, rows):
+        """Synced lyrics filling the visualizer slot — the active line glows
+        and the view auto-scrolls to keep it centered. Untimed lyrics scroll
+        slowly with playback so they still drift past."""
+        lines = self._get_lyrics(self.now) if self.now else []
+        aligning = self.now and self._aligning == self.now.video_id
+        if lines is None:
+            return self._lyrics_msg(
+                w, rows, "aligning to audio…" if aligning else "loading lyrics…")
+        if not lines:
+            return self._lyrics_msg(
+                w, rows, "aligning to audio…" if aligning
+                else "no lyrics for this one — G to align audio")
+
+        pos = self.player.props.get("time-pos") or 0
+        synced = lines[0][0] >= 0
+        if synced:
+            cur = 0
+            for i, (t, _) in enumerate(lines):
+                if t <= pos:
+                    cur = i
+                else:
+                    break
+        else:
+            dur = self.player.props.get("duration") or 0
+            frac = (pos / dur) if dur else 0
+            cur = min(len(lines) - 1, max(0, int(frac * len(lines))))
+
+        # the WHOLE column is the theme's accent — the live line glows
+        # bright, the rest stay the same hue but dim with distance (a dark
+        # tint of the accent, never neutral grey) so it always reads themed
+        out = []
+        top = cur - rows // 2
+        half = max(1, rows // 2)
+        for r in range(rows):
+            idx = top + r
+            if 0 <= idx < len(lines):
+                txt = lines[idx][1] or "♪"
+                if idx == cur:
+                    body = BOLD + fg(lerp(PINK, WHITE, 0.25)) + txt + RESET
+                else:
+                    d = min(1.0, abs(idx - cur) / half)
+                    bright = 0.85 - 0.62 * d          # 0.85 near → 0.23 far
+                    col = tuple(int(c * bright) for c in PINK)
+                    body = fg(col) + txt + RESET
+                out.append(crop_pad(f"{' ' * max((w - str_w(txt)) // 2, 0)}{body}", w))
+            else:
+                out.append(crop_pad("", w))
+        if not synced and rows >= 3:           # rough scroll → offer real sync
+            hint = ("⟁ aligning to audio…"
+                    if self._aligning == self.now.video_id
+                    else "G ▸ sync these to this audio")
+            out[-1] = crop_pad(f"{fg(DGREY)}{ITAL}{hint:^{w}}{RESET}", w)
+        return out
+
+    def _lyrics_msg(self, w, rows, text):
+        out = []
+        for r in range(rows):
+            if r == rows // 2:
+                out.append(crop_pad(
+                    f"{fg(DGREY)}{ITAL}{text:^{w}}{RESET}", w))
+            else:
+                out.append(crop_pad("", w))
+        return out
+
     def _render_now(self, w, h):
         out = []
         if not self.now:
@@ -4481,7 +4912,10 @@ class App:
         out.append(crop_pad(fg(GREY) + f"{sub:^{w}}" + RESET, w))
         out.append(crop_pad("", w))
 
-        out.extend(self._render_visualizer(w, viz_rows))
+        if self.lyrics_on:
+            out.extend(self._render_lyrics(w, viz_rows))
+        else:
+            out.extend(self._render_visualizer(w, viz_rows))
         out.extend(self._render_progress(w))
 
         while len(out) < h:

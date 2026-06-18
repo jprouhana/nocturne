@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Force-align lyrics to a track's real audio using the voice-type venv's
+# faster-whisper (+ its CUDA libs). Called by NOCTURNE's `G` key.
+#   nocturne-align --audio <ytid|scurl> --lyrics-file <txt> --out <lrc>
+#
+# Reuses the local faster-whisper install set up for voice dictation
+# (~/.local/share/voice-type/venv). align.py lives next to this script.
+set -euo pipefail
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+DIR="$(cd "$(dirname "$SELF")" && pwd)"
+ALIGN="$DIR/align.py"
+
+VT_HOME="$HOME/.local/share/voice-type"
+VENV="$VT_HOME/venv"
+PY="$VENV/bin/python"
+
+if [ ! -x "$PY" ]; then
+  echo "voice-type venv not found at $VENV (faster-whisper needed for G/align)" >&2
+  exit 10
+fi
+
+# pull model/device prefs from the voice-type config if present
+[ -f "$HOME/.config/voice-type/config" ] && . "$HOME/.config/voice-type/config"
+export VT_MODEL="${VT_MODEL:-large-v3-turbo}"
+export VT_DEVICE="${VT_DEVICE:-cuda}"
+export VT_COMPUTE="${VT_COMPUTE:-float16}"
+
+# CUDA shared libs (cudnn/cublas/nvrtc wheels live in the venv site-packages)
+SP="$("$PY" -c 'import site; print(site.getsitepackages()[0])')"
+export LD_LIBRARY_PATH="$SP/nvidia/cudnn/lib:$SP/nvidia/cublas/lib:$SP/nvidia/cuda_nvrtc/lib:${LD_LIBRARY_PATH:-}"
+
+exec "$PY" "$ALIGN" "$@"

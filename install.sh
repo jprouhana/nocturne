@@ -32,6 +32,11 @@ EOF
 chmod +x "$HOME/.local/bin/ytm"
 ln -sf "$HOME/.local/bin/ytm" "$HOME/.local/bin/nocturne"
 
+# `G` lyric alignment (optional): reuses a faster-whisper voice-type venv if
+# present. The wrapper finds align.py next to itself, so a symlink is enough.
+chmod +x "$here/tools/nocturne-align" 2>/dev/null || true
+ln -sf "$here/tools/nocturne-align" "$HOME/.local/bin/nocturne-align"
+
 case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
     *) echo "note: add ~/.local/bin to your PATH" ;;
