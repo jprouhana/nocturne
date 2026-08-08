@@ -1104,7 +1104,10 @@ class SpectrumTap:
     """
 
     RATE = 44100
-    CHUNK = 2048  # ~46 ms per FFT frame — steadier spectrum for the bars
+    CHUNK = 2048  # FFT window — keeps the frequency resolution
+    HOP = 512     # ~12 ms refresh: a sliding window puts a hi-hat on
+                  # screen the frame it happens — the old tumbling
+                  # 46 ms chunks were the audible visual lag
 
     def __init__(self, source_cmd=None):
         self.alive = False
@@ -1168,7 +1171,8 @@ class SpectrumTap:
                 self._sink = sink
                 return ["parec", "--raw", "--format=float32le",
                         f"--rate={self.RATE}", "--channels=1",
-                        "--latency-msec=30", "-d", f"{sink}.monitor"]
+                        "--latency-msec=30", "--process-time-msec=10",
+                        "-d", f"{sink}.monitor"]
         if sys.platform == "darwin" and shutil.which("ffmpeg"):
             # no monitor sources on coreaudio — tap a loopback device
             # (brew install blackhole-2ch + a multi-output device)
@@ -1184,7 +1188,7 @@ class SpectrumTap:
     def _run(self):
         import numpy as np
         win = np.hanning(self.CHUNK).astype(np.float32)
-        nbytes = self.CHUNK * 4
+        nbytes = self.HOP * 4
         while not self._stop:
             cmd = self._build_cmd()
             if not cmd:
@@ -1196,6 +1200,7 @@ class SpectrumTap:
                 return
             self.alive = True
             buf = b""
+            ring = np.zeros(self.CHUNK, np.float32)
             check_t = time.time()
             switched = False
             while not self._stop:
@@ -1205,14 +1210,15 @@ class SpectrumTap:
                 buf += data
                 if len(buf) < nbytes:
                     continue
-                samples = np.frombuffer(buf, dtype=np.float32)
+                hop = np.frombuffer(buf, dtype=np.float32)
                 buf = b""
-                spec = np.abs(np.fft.rfft(samples * win))
-                if float(np.abs(samples).max()) > 1e-3:
+                ring = np.concatenate((ring[self.HOP:], hop))
+                spec = np.abs(np.fft.rfft(ring * win))
+                if float(np.abs(hop).max()) > 1e-3:
                     self._sig_t = time.time()
                 with self._lock:
                     self._spectrum = spec
-                    self._samples = samples
+                    self._samples = ring
                 # follow the default sink: plugging in headphones moves it,
                 # but parec stays pinned to the old monitor — re-pin
                 if (not self._source_cmd and getattr(self, "_sink", "")
@@ -1544,12 +1550,24 @@ def write_auth_from_cookies(cookies):
         "authorization": f"SAPISIDHASH {ts}_{sha}",
         "cookie": cookie_str,
     }
+    # keep the existing session file: if the fresh import turns out
+    # dead (logged-out browser, network blip during verify), restoring
+    # it beats deleting the account link outright
+    prev = None
+    if os.path.isfile(AUTH_FILE):
+        with open(AUTH_FILE) as f:
+            prev = f.read()
     with open(AUTH_FILE, "w") as f:
         json.dump(headers, f, indent=2)
     os.chmod(AUTH_FILE, 0o600)
     if verify_auth():
         return True
-    os.unlink(AUTH_FILE)
+    if prev is not None:
+        with open(AUTH_FILE, "w") as f:
+            f.write(prev)
+        os.chmod(AUTH_FILE, 0o600)
+    else:
+        os.unlink(AUTH_FILE)
     return False
 
 
@@ -1769,7 +1787,7 @@ def oauth_login():
 
 TABS = ["Search", "Library", "Playlists", "Queue"]
 BLOCKS = " ▁▂▃▄▅▆▇█"
-VIZ_STYLES = ["bars", "mirror", "scope", "bands", "drop", "cover"]
+VIZ_STYLES = ["bars", "mirror", "scope", "bands", "drop", "cover", "sigil"]
 
 # the blackspace family — calm interference waves glowing out of darkness,
 # cheap to compute (a few sines, no log/atan stacks); they join the app's
@@ -5101,6 +5119,7 @@ class App:
             raw = (0.0, 0.0, 0.0)
         elif self.tap and self.tap.producing:
             lv = self.tap.levels(18)
+            self._drop_onset(lv)
             raw = (sum(lv[:5]) / 5, sum(lv[5:12]) / 7, sum(lv[12:]) / 6)
         else:
             t0 = time.time()
@@ -5126,7 +5145,27 @@ class App:
         if bool(self.player.props.get("pause")) or self.player.loading:
             return [0.0] * n
         if self.tap and self.tap.producing:
-            return self.tap.levels(n)
+            lv = self.tap.levels(n)
+            # per-band auto-gain: raw FFT power tilts hard toward bass —
+            # a slowed track renders as a descending staircase. each band
+            # rides its own slow envelope instead, so the whole spectrum
+            # dances no matter how the energy is tilted
+            agc = getattr(self, "_viz_agc", None)
+            if agc is None or len(agc) != n:
+                agc = self._viz_agc = [0.3] * n
+            # band fairness × global loudness: pure normalization pinned
+            # everything at max and erased the song's dynamics — quiet
+            # passages should sit low, drops should tower
+            m = sum(lv) / n
+            gpk = max(getattr(self, "_viz_gpk", 0.3) * 0.996, m, 0.08)
+            self._viz_gpk = gpk
+            g = 0.40 + 0.60 * min(1.0, m / gpk) ** 0.7
+            out = []
+            for i, x in enumerate(lv):
+                a = max(agc[i] * 0.995, x * 1.12, 0.05)
+                agc[i] = a
+                out.append(min(1.0, x / a) * g)
+            return out
         t = time.time()
         return [max(0.0, min(1.0,
                 (math.sin(t * 2.1 + i * 0.55) +
@@ -5139,8 +5178,9 @@ class App:
         now = time.time()
         dt = min(max(now - self._phys_t, 0.005), 0.2)
         self._phys_t = now
-        fall = 1.1 * dt
-        pfall = 0.38 * dt
+        tempo = getattr(self, "_drop_tempo", 1.0)
+        fall = 1.1 * dt * tempo
+        pfall = 0.38 * dt * tempo
         n = len(targets)
         if len(self.bars) != n:
             self.bars = [0.0] * n
@@ -5197,6 +5237,8 @@ class App:
             return self._viz_bands(w, rows, n, pad_l)
         if self.viz_style in ("drop", "cover"):
             return self._viz_drop(w, rows, n, pad_l)
+        if self.viz_style == "sigil":
+            return self._viz_sigil(w, rows, n, pad_l)
 
         if self.viz_style == "mirror":
             m = n // 2 + 1
@@ -5835,21 +5877,76 @@ class App:
             if now is not None and art is not None:
                 pal = art.palette(getattr(now, "thumb", ""))
                 if pal is not None:
+                    import numpy as np
+                    # judge saturation on the BRIGHT ramp only — every
+                    # palette's low end is near-black (chroma ~0), and
+                    # averaging it in made tinted covers read as "grey"
+                    # and get wrongly repainted with the theme
+                    top = pal[40:]
+                    sat = float(np.mean(top.max(axis=1) - top.min(axis=1)))
+                    if sat < 22.0:
+                        # genuinely monochrome art: keep its luminance
+                        # ramp, borrow just enough theme to not be grey
+                        pal = pal * 0.55 + self._drop_lut_theme() * 0.45
+                    # single-hue covers render the whole plasma one flat
+                    # color — sweep the hue across the ramp (dark end
+                    # cool, bright end warm, ±26°) so the field gets
+                    # depth while the art keeps its identity
+                    sweep = getattr(self, "_cover_sweep", None)
+                    if sweep is None:
+                        o3, q3 = 1.0 / 3.0, math.sqrt(1.0 / 3.0)
+                        ms = []
+                        for k in range(64):
+                            a = (k / 63.0 - 0.5) * 0.9
+                            c1, s1 = math.cos(a), math.sin(a)
+                            ms.append([[c1 + o3 * (1 - c1),
+                                        o3 * (1 - c1) - q3 * s1,
+                                        o3 * (1 - c1) + q3 * s1],
+                                       [o3 * (1 - c1) + q3 * s1,
+                                        c1 + o3 * (1 - c1),
+                                        o3 * (1 - c1) - q3 * s1],
+                                       [o3 * (1 - c1) - q3 * s1,
+                                        o3 * (1 - c1) + q3 * s1,
+                                        c1 + o3 * (1 - c1)]])
+                        sweep = self._cover_sweep = np.array(ms)
+                    pal = np.clip(np.einsum("kij,kj->ki", sweep, pal),
+                                  0, 255)
                     return g(pal)
         if self._drop_lut_cache is None:
-            import numpy as np
-            # anchored dark lows so light themes (ice…) still have contrast
-            stops = [(8, 8, 14), lerp((8, 8, 14), RED, 0.45), RED,
-                     ORANGE, PINK, lerp(PINK, WHITE, 0.55)]
-            pos = [0.0, 0.34, 0.60, 0.80, 0.94, 1.0]
-            lut = []
-            for i in range(64):
-                t = i / 63
-                a = max(j for j in range(len(pos) - 1) if pos[j] <= t)
-                f = (t - pos[a]) / (pos[a + 1] - pos[a])
-                lut.append(lerp(stops[a], stops[a + 1], f))
-            self._drop_lut_cache = np.array(lut, dtype=float)
+            self._drop_lut_cache = self._drop_lut_theme()
         return g(self._drop_lut_cache)
+
+    def _drop_lut_theme(self):
+        import numpy as np
+        # anchored dark lows so light themes (ice…) still have contrast
+        stops = [(8, 8, 14), lerp((8, 8, 14), RED, 0.45), RED,
+                 ORANGE, PINK, lerp(PINK, WHITE, 0.55)]
+        pos = [0.0, 0.34, 0.60, 0.80, 0.94, 1.0]
+        lut = []
+        for i in range(64):
+            t = i / 63
+            a = max(j for j in range(len(pos) - 1) if pos[j] <= t)
+            f = (t - pos[a]) / (pos[a + 1] - pos[a])
+            lut.append(lerp(stops[a], stops[a + 1], f))
+        return np.array(lut, dtype=float)
+
+    def _drop_onset(self, lv):
+        """Spectral flux: the summed POSITIVE change across all 18
+        bands since the last frame — the standard onset signal. A hit
+        anywhere in the spectrum spikes it; steady tones don't. The
+        groove's kick gate uses it alongside the bass threshold, which
+        alone kept missing half the hits ('accuracy with the music')."""
+        prev = getattr(self, "_flux_prev", None)
+        self._flux_prev = list(lv)
+        if prev is None or len(prev) != len(lv):
+            return
+        fx = sum(max(0.0, a - b) for a, b in zip(lv, prev))
+        fa = getattr(self, "_flux_avg", 0.2) * 0.97 + fx * 0.03
+        self._flux_avg = fa
+        fv = getattr(self, "_flux_var", 0.05) * 0.97 \
+            + (fx - fa) ** 2 * 0.03
+        self._flux_var = fv
+        self._drop_fluxv = (fx, fa, math.sqrt(fv))
 
     def _drop_groove(self, raw, dt, now):
         """Beat-locked drive signals. Raw spectrum jitter is flattened into
@@ -5862,20 +5959,33 @@ class App:
         last = getattr(self, "_beat_t", 0.0)
         if now < last:            # wall clock jumped backwards (common under WSL) — resync
             self._beat_t = last = now
-        if rb > avg * 1.45 + 0.06 and now - last > 0.22:
+        fx, fa, fsd = getattr(self, "_drop_fluxv", (0.0, 9e9, 0.0))
+        onset = fx > fa + 1.1 * fsd + 0.015
+        if (rb > avg * 1.45 + 0.06
+                or (onset and rb > avg * 1.05)) and now - last > 0.16:
             gaps = getattr(self, "_beat_gaps", [])
             if last and 0.25 < now - last < 2.0:
                 gaps = (gaps + [now - last])[-8:]
             self._beat_gaps = gaps
             self._beat_t = now
-            self._beat_amp = min(1.0, 0.45 + (rb - avg) * 2.0)
+            self._beat_n = getattr(self, "_beat_n", 0) + 1
+            self._beat_amp = min(1.0, 0.45 + max(
+                (rb - avg) * 2.0, (fx - fa) * 1.5))
             last = now
         pulse = getattr(self, "_beat_amp", 0.0) * math.exp(-max(0.0, now - last) / 0.42)
         groove = 0.0
         gaps = getattr(self, "_beat_gaps", [])
+        tfr = 1.0
         if len(gaps) >= 4:                     # tempo locked — keep bobbing
             period = sorted(gaps)[len(gaps) // 2]
             groove = 0.5 + 0.5 * math.cos((now - last) / period * math.tau)
+            # tempo factor: every motion clock scales with the song's
+            # BPM (normalized at 90) — fast songs move fast, slow songs
+            # breathe. clamped and smoothed so a misread gap can't jerk
+            tfr = min(2.2, max(0.8, 60.0 / max(period, 1e-3) / 90.0))
+        tempo = getattr(self, "_drop_tempo", 1.0)
+        tempo += (tfr - tempo) * min(1.0, dt * 1.5)
+        self._drop_tempo = tempo
         # mids and highs get their own transient detectors, so vocal
         # swells and hi-hats hit visibly instead of everything hanging
         # off the kick drum: mids surge the flow, hats spark the detail
@@ -5886,14 +5996,19 @@ class App:
         mlast = getattr(self, "_mid_t", 0.0)
         if now < mlast:           # backward clock jump (WSL) — resync
             self._mid_t = mlast = now
-        if rm > mavg * 1.5 + 0.05 and now - mlast > 0.18:
+        if rm > mavg * 1.35 + 0.04 and now - mlast > 0.12:
             self._mid_t = mlast = now
             self._mid_amp = min(1.0, 0.4 + (rm - mavg) * 2.2)
         mpul = getattr(self, "_mid_amp", 0.0) * math.exp(-max(0.0, now - mlast) / 0.30)
+        if now - last > 2.5:
+            # kick-starved (slowed/sustained bass): let the strongest
+            # mid transient stand in for the beat so the field keeps
+            # swelling instead of going passive
+            pulse = max(pulse, 0.75 * mpul)
         tlast = getattr(self, "_tre_t", 0.0)
         if now < tlast:           # backward clock jump (WSL) — resync
             self._tre_t = tlast = now
-        if rt > tavg * 1.55 + 0.04 and now - tlast > 0.09:
+        if rt > tavg * 1.35 + 0.03 and now - tlast > 0.07:
             self._tre_t = tlast = now
             self._tre_amp = min(1.0, 0.35 + (rt - tavg) * 2.5)
         tpul = getattr(self, "_tre_amp", 0.0) * math.exp(-max(0.0, now - tlast) / 0.15)
@@ -5955,6 +6070,7 @@ class App:
             raw = (0.0, 0.0, 0.0)
         elif self.tap and self.tap.producing:
             lv = self.tap.levels(18)
+            self._drop_onset(lv)
             raw = (sum(lv[:5]) / 5, sum(lv[5:12]) / 7, sum(lv[12:]) / 6)
         else:
             t0 = time.time()
@@ -5975,6 +6091,7 @@ class App:
         ps += (pulse - ps) * min(1.0, dt * 16.0)
         self._pulse_s = ps
         self._drop_t += dt * getattr(self, "viz_speed", 1.0) * \
+            getattr(self, "_drop_tempo", 1.0) * \
             (0.55 + 1.1 * en + 1.6 * ps
              + 0.7 * getattr(self, "_mid_pulse", 0.0))
         t = self._drop_t
@@ -5982,7 +6099,8 @@ class App:
         # aspect-correct coordinates: half-block pixels are ~square, so the
         # field stops stretching into smears on wide panels (rings stay round)
         aspect = min(W / max(H, 1), 4.5)   # cap so wide strips stay coherent
-        zoom = 1.15 / (1.0 + 0.16 * ps)    # camera swells in on the kick
+        zoom = 1.15 / (1.0 + 0.16 * ps
+                       + 0.07 * getattr(self, "_mid_pulse", 0.0))
         # sample budget: maximized terminals ask for ~10× the pixels of the
         # side panel — compute the field at a capped resolution and stretch
         if mode == 2:
@@ -6020,7 +6138,8 @@ class App:
             self._drop_mix = 0.0
             self._drop_last_switch = now
             self._drop_switch_at = now + random.uniform(12, 24) / \
-                max(0.4, getattr(self, "viz_morph", 1.0))
+                (max(0.4, getattr(self, "viz_morph", 1.0))
+                 * getattr(self, "_drop_tempo", 1.0))
 
         if self._drop_mix < 1.0:
             self._drop_mix = min(1.0, self._drop_mix + dt / 2.5)
@@ -6039,8 +6158,12 @@ class App:
                 *coords(self._drop_pa), t, eb, em, et), self._drop_pa)
         # brightness: slow mood bed + a lift on the kick, plus a quick
         # sparkle when the hats tick — alive in the highs, no strobing
-        bright = min(1.05, 0.30 + 0.50 * min(1.0, en * 1.5) + 0.26 * ps
-                     + 0.14 * getattr(self, "_tre_pulse", 0.0))
+        # flux onsets raised the beat duty-cycle a lot — at the old
+        # weights the field lived pinned in the palette's washed top
+        # end ("bland"). lower bed, smaller adders: hits read as PUNCH
+        bright = min(1.02, 0.24 + 0.44 * min(1.0, en * 1.5) + 0.24 * ps
+                     + 0.11 * getattr(self, "_tre_pulse", 0.0)
+                     + 0.08 * getattr(self, "_mid_pulse", 0.0))
         idxf = np.clip(v * 63, 0, 63)          # palette space, float
         # ~70ms ease on the field: values glide between frames instead
         # of snapping, which is most of what reads as "choppy". applied
@@ -6111,6 +6234,710 @@ class App:
             lines.append(left + "".join(
                 fgs[f] + bgs[b] + QUADS[bt]
                 for f, b, bt in zip(fl, bl, btl)) + RESET + right)
+        return lines
+
+    SIGIL_KINDS = 11
+
+    def _viz_sigil_word(self, lv, big):
+        """The song's visual vocabulary: a hit's spectrum, normalized so
+        loudness doesn't matter, is clustered against the sounds heard so
+        far — the same-sounding hi-hat summons the SAME structure every
+        time, and a new sound (the bass dropping in) mints a new one.
+        Random-per-hit felt wrong: repetition in the music should read
+        as repetition on screen."""
+        v = [sum(lv[i * 3:(i + 1) * 3]) / 3 for i in range(6)]
+        m = max(v) or 1.0
+        v = [x / m for x in v]
+        vocab = getattr(self, "_sigil_vocab", None)
+        if vocab is None:
+            vocab = self._sigil_vocab = []
+        best, bd = None, 1e9
+        for ent in vocab:
+            if ent[3] != big:
+                continue
+            d = sum(abs(a - b) for a, b in zip(ent[0], v))
+            if d < bd:
+                bd, best = d, ent
+        if best is not None and bd < 0.55:
+            best[2] = time.time()
+            return best[1]
+        sig = random.randrange(1 << 30)
+        vocab.append([v, sig, time.time(), big])
+        if len(vocab) > 24:            # forget the stalest sound
+            vocab.sort(key=lambda e: e[2])
+            del vocab[0]
+        return sig
+
+    def _viz_sigil_new(self, now, aspect, big, amp, sig):
+        """Build the structure for a hit — every roll comes off the
+        sound's signature, so one sound is always the same kind, hue,
+        and place; only its intensity rides the individual hit."""
+        rng = random.Random(sig * 2 + (1 if big else 0))
+        kind = rng.randrange(self.SIGIL_KINDS)
+        # ~1 in 5 sounds burns white-hot instead of colored
+        sat = rng.uniform(0.08, 0.2) if rng.random() < 0.18 \
+            else rng.uniform(0.72, 1.0)
+        h6 = rng.random() * 6.0
+        base = (min(max(abs(h6 - 3) - 1, 0.0), 1.0),
+                min(max(2 - abs(h6 - 2), 0.0), 1.0),
+                min(max(2 - abs(h6 - 4), 0.0), 1.0))
+        ax = min(aspect, 1.6)
+        segs, dots = self._viz_sigil_make(kind, rng)
+        return {"k": kind,
+                "x": rng.uniform(-0.52, 0.52) * ax,
+                "y": rng.uniform(-0.38, 0.42),
+                "s": rng.uniform(0.6, 1.05) if big
+                else rng.uniform(0.3, 0.5),
+                # architectural kinds stay near-upright; radial ones spin
+                "rot": rng.uniform(-0.35, 0.35)
+                if kind in (1, 3, 4, 6) else rng.uniform(0, math.tau),
+                "spin": rng.uniform(-0.3, 0.3) if kind in (0, 2, 5) else 0.0,
+                "rgb": tuple(1.0 - sat * (1.0 - c) for c in base),
+                "amp": amp,
+                "born": now,
+                "life": rng.uniform(1.3, 2.1) if big
+                else rng.uniform(0.55, 0.9),
+                "seed": sig & 0xFFFF,
+                "S": segs, "D": dots}
+
+    def _viz_sigil_make(self, kind, rng):
+        """Compose a structure in the actual cybersigilism vocabulary
+        (studied from real tattoo work): a dense central KNOT of wrapped
+        crescents, rings and droplet dots, with long extreme-taper
+        NEEDLES escaping it, crescent claws hooking around, everything
+        bilaterally symmetric — density in the core, needles at the
+        edges. Mirrored strokes share draw-order so the sigil unfolds
+        symmetrically as it writes itself on."""
+        S, D = [], []
+        grp = 0.0
+
+        def dot(x, y, r=1.5, mirror=True):
+            nonlocal grp
+            D.append((x, y, r, grp))
+            if mirror and abs(x) > 0.03:
+                D.append((-x, y, r, grp))
+            grp += 1.0
+
+        def whip(a, c, b, w0, mirror=True, wtip=0.1, n=10):
+            nonlocal grp
+            pts = []
+            for i in range(n + 1):
+                t = i / n
+                u = 1 - t
+                pts.append((u * u * a[0] + 2 * u * t * c[0] + t * t * b[0],
+                            u * u * a[1] + 2 * u * t * c[1] + t * t * b[1]))
+            for i in range(n):
+                t0, t1 = i / n, (i + 1) / n
+                w1 = w0 * (1 - t0) ** 1.2 + wtip
+                w2 = w0 * (1 - t1) ** 1.2 + wtip
+                o = grp + t0 * 2.2
+                S.append((pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1],
+                          w1, w2, o))
+                if mirror:
+                    S.append((-pts[i][0], pts[i][1],
+                              -pts[i + 1][0], pts[i + 1][1], w1, w2, o))
+            grp += 3.0
+            return pts
+
+        def needle(x0, y0, a, L, w0=1.0, curve=0.0, mirror=True):
+            """Long spike from (x0,y0) along angle a (0 = up), tapering
+            to nothing — the escaping thorns at a sigil's edge."""
+            dx, dy = math.sin(a), -math.cos(a)
+            whip((x0, y0),
+                 (x0 + dx * L * 0.55 - dy * curve,
+                  y0 + dy * L * 0.55 + dx * curve),
+                 (x0 + dx * L, y0 + dy * L), w0,
+                 mirror=mirror, wtip=0.05, n=6)
+
+        def crescent(kx, ky, r, a0, a1, w0=1.0, mirror=True, n=8):
+            """Claw arc: width peaks mid-arc, needle points both ends."""
+            nonlocal grp
+            pts = [(kx + math.cos(a0 + (a1 - a0) * i / n) * r,
+                    ky + math.sin(a0 + (a1 - a0) * i / n) * r)
+                   for i in range(n + 1)]
+            for i in range(n):
+                t0, t1 = i / n, (i + 1) / n
+                w1 = w0 * math.sin(math.pi * t0) ** 0.7 + 0.08
+                w2 = w0 * math.sin(math.pi * t1) ** 0.7 + 0.08
+                o = grp + t0 * 2.0
+                S.append((pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1],
+                          w1, w2, o))
+                if mirror:
+                    S.append((-pts[i][0], pts[i][1],
+                              -pts[i + 1][0], pts[i + 1][1], w1, w2, o))
+            grp += 2.5
+            return pts
+
+        def ring(kx, ky, r, w0=0.8, n=12):
+            nonlocal grp
+            pts = [(kx + math.cos(i / n * math.tau) * r,
+                    ky + math.sin(i / n * math.tau) * r)
+                   for i in range(n + 1)]
+            for i in range(n):
+                S.append((pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1],
+                          w0, w0, grp + (i / n) * 1.5))
+            grp += 2.0
+
+        def knot(kx, ky, s_):
+            """The dense core: crescents wrapped around a ringed eye."""
+            for i in range(3):
+                a0 = rng.uniform(0, math.tau)
+                crescent(kx, ky, s_ * rng.uniform(0.55, 1.0), a0,
+                         a0 + rng.uniform(1.5, 2.4), 1.0)
+            ring(kx, ky, s_ * 0.38, 0.8)
+            dot(kx, ky, 1.5, mirror=False)
+
+        if kind == 0:      # thorn knot — dense heart, needles escaping
+            knot(0, 0, 0.32)
+            n_n = rng.randrange(3, 5)
+            for j in range(n_n):
+                a = 0.25 + j * (2.4 / n_n) + rng.uniform(-0.1, 0.1)
+                needle(0, 0, a, rng.uniform(0.7, 1.15) * (1 - 0.1 * j),
+                       1.1, curve=rng.uniform(-0.12, 0.12))
+            for r_ in (0.55, 0.78):
+                a0 = rng.uniform(0, math.tau)
+                crescent(0, 0, r_, a0, a0 + rng.uniform(0.9, 1.5), 0.95)
+            dot(rng.uniform(0.08, 0.2), -0.5, 1.1)
+            dot(rng.uniform(0.08, 0.2), 0.5, 1.1)
+        elif kind == 1:    # spine relic — knotted axis, claws hugging it
+            needle(0, -0.2, 0.0, 1.15, 1.3, mirror=False)
+            needle(0, 0.2, math.pi, 1.15, 1.3, mirror=False)
+            knot(0, -0.28, 0.24)
+            knot(0, 0.32, 0.19)
+            for y0, L in ((-0.15, 0.6), (0.28, 0.5)):
+                needle(0.05, y0, rng.uniform(1.0, 1.45), L, 0.9, curve=0.12)
+            crescent(0, 0.02, 0.42, -0.55, 1.25, 1.0)
+            dot(0, -0.95, 1.3, mirror=False)
+            dot(0, 0.95, 1.3, mirror=False)
+        elif kind == 2:    # demon star — concave points, nested arcs
+            N = rng.choice([4, 5])
+            r_in = 0.24
+            r_out = rng.uniform(0.78, 0.95)
+            a0 = -math.pi / 2 + (rng.random() < 0.5) * math.pi / N
+            for j in range(N):
+                a = a0 + j * math.tau / N
+                B = (math.cos(a) * r_out, math.sin(a) * r_out)
+                for dj in (-0.5, 0.5):
+                    av = a + dj * math.tau / N
+                    A = (math.cos(av) * r_in, math.sin(av) * r_in)
+                    whip(A, ((A[0] + B[0]) * 0.5 * 0.35,
+                             (A[1] + B[1]) * 0.5 * 0.35), B,
+                         1.1, mirror=False, n=8)
+                needle(B[0], B[1], a + math.pi / 2, 0.22, 0.7, mirror=False)
+                dot(*B, 1.1, mirror=False)
+                am = a + math.tau / (2 * N)
+                crescent(0, 0, r_out * 0.55, am - 0.42, am + 0.42,
+                         0.85, mirror=False)
+            ring(0, 0, 0.15, 0.75)
+            dot(0, 0, 1.4, mirror=False)
+        elif kind == 3:    # claw wing — nested talon arcs crown the knot
+            knot(0, 0.34, 0.18)
+            for j, r_ in enumerate((0.4, 0.58, 0.76)):
+                a0 = math.pi * 1.02 + 0.06 * j
+                a1 = math.pi * 1.78 - 0.04 * j
+                crescent(0.04, 0.3, r_, a0, a1, 1.1)
+                # each talon's tip continues as an escaping needle
+                tx = 0.04 + math.cos(a1) * r_
+                ty = 0.3 + math.sin(a1) * r_
+                needle(tx, ty, math.atan2(math.cos(a1), -math.sin(a1)),
+                       0.28 + 0.06 * j, 0.75)
+            dot(0.04 + math.cos(math.pi * 1.05) * 0.58,
+                0.3 + math.sin(math.pi * 1.05) * 0.58, 1.0)
+        elif kind == 4:    # neon badge — the logo-sheet look: lozenge,
+            d_ = rng.uniform(0.55, 0.7)         # eye ring, crown spikes
+            corners = [(0, -d_), (d_ * 0.72, 0), (0, d_),
+                       (-d_ * 0.72, 0), (0, -d_)]
+            for p, q in zip(corners, corners[1:]):
+                S.append((p[0], p[1], q[0], q[1], 0.95, 0.95, grp))
+                grp += 1.0
+            ring(0, 0, d_ * 0.4, 0.85)
+            needle(0, -d_, 0.0, 0.45, 1.0, mirror=False)
+            needle(0, d_, math.pi, 0.45, 1.0, mirror=False)
+            needle(d_ * 0.72, 0, math.pi / 2, 0.3, 0.8)
+            dot(0, 0, 1.3, mirror=False)
+            dot(d_ * 0.72, 0, 1.0)
+        elif kind == 5:    # sigil heart — lobed outline, ringed eye,
+            lobe = rng.uniform(0.65, 0.85)      # needle tail
+            whip((0, -0.6), (lobe, -0.62), (0, 0.66), 1.2, n=12)
+            ring(0, -0.02, 0.15, 0.75)
+            needle(0, 0.66, math.pi, 0.5, 1.0, mirror=False)
+            needle(0.12, 0.52, math.pi * 0.82, 0.35, 0.8)
+            needle(0, -0.6, 0.0, 0.4, 0.9, mirror=False)
+            crescent(0, -0.3, 0.3, math.pi * 1.15, math.pi * 1.85, 0.85)
+            dot(0, -0.6, 1.3, mirror=False)
+            dot(0, 0.66, 1.3, mirror=False)
+            dot(0, -0.02, 1.2, mirror=False)
+        elif kind == 7:    # serpent — coiled body, rib thorns, head eye
+            n_ = 12
+            fr = rng.uniform(1.1, 1.6)
+            amp_ = rng.uniform(0.28, 0.45)
+            pts = [(amp_ * math.sin(t / n_ * math.tau * fr),
+                    0.95 - 1.85 * t / n_) for t in range(n_ + 1)]
+            for i in range(n_):
+                t0, t1 = i / n_, (i + 1) / n_
+                w1 = 1.35 * math.sin(math.pi * t0) ** 0.5 + 0.12
+                w2 = 1.35 * math.sin(math.pi * t1) ** 0.5 + 0.12
+                S.append((pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1],
+                          w1, w2, grp + t0 * 3.0))
+            grp += 4.0
+            for i in (3, 6, 9):
+                needle(pts[i][0], pts[i][1],
+                       (math.pi / 2) * (1 if i % 2 else -1)
+                       + rng.uniform(-0.3, 0.3),
+                       rng.uniform(0.3, 0.5), 0.8, mirror=False)
+            ring(pts[-1][0], pts[-1][1], 0.12, 0.8)
+            dot(pts[-1][0], pts[-1][1], 1.4, mirror=False)
+        elif kind == 8:    # eye relic — almond lids, iris, lash needles
+            w_ = rng.uniform(0.75, 0.95)
+            whip((-w_, 0), (0, -0.58), (w_, 0), 1.1, mirror=False, n=10)
+            whip((-w_, 0), (0, 0.58), (w_, 0), 1.1, mirror=False, n=10)
+            ring(0, 0, 0.22, 0.9)
+            dot(0, 0, 1.8, mirror=False)
+            for j in range(3):
+                a = -0.5 + j * 0.5
+                needle(math.sin(a) * w_ * 0.4, -0.27, a,
+                       rng.uniform(0.3, 0.45), 0.8)
+            needle(w_, 0, math.pi / 2, 0.3, 0.9)
+        elif kind == 9:    # twin moons — interlocked crescents + axis
+            crescent(0.18, -0.12, 0.5, math.pi * 0.6, math.pi * 1.9,
+                     1.2, mirror=False)
+            crescent(-0.18, 0.12, 0.5, math.pi * 1.6, math.pi * 2.9,
+                     1.2, mirror=False)
+            needle(0, -0.2, 0.0, 0.9, 1.0, mirror=False)
+            needle(0, 0.2, math.pi, 0.9, 1.0, mirror=False)
+            for _ in range(3):
+                a = rng.uniform(0, math.tau)
+                dot(math.cos(a) * 0.75, math.sin(a) * 0.75, 1.0)
+        elif kind == 10:   # totem stack — knotted column, side thorns
+            for yy, ss in ((-0.55, 0.22), (0.0, 0.28), (0.55, 0.2)):
+                knot(0, yy, ss)
+            needle(0, -0.75, 0.0, 0.45, 1.1, mirror=False)
+            needle(0, 0.75, math.pi, 0.45, 1.1, mirror=False)
+            for yy in (-0.28, 0.28):
+                needle(0.06, yy, rng.uniform(1.1, 1.5), 0.5, 0.85)
+        else:              # needle burst — the radiant starburst piece
+            knot(0, 0, 0.24)
+            n_n = rng.randrange(5, 7)
+            for j in range(n_n):
+                a = (j + 0.5) * math.pi / n_n + rng.uniform(-0.07, 0.07)
+                L = rng.uniform(0.55, 1.2) * (1.15 - 0.3 * (j % 2))
+                needle(0, 0, a, L, 1.0, curve=rng.uniform(-0.08, 0.08))
+                if j % 2 == 0:
+                    tx = math.sin(a) * (L + 0.06)
+                    ty = -math.cos(a) * (L + 0.06)
+                    dot(tx, ty, 0.9)
+        # normalize draw-order so every sigil finishes writing in ~0.4s
+        mo = max([s[6] for s in S] + [d[3] for d in D]) or 1.0
+        if mo > 11.0:
+            f = 11.0 / mo
+            S = [(a, b, c, d_, w1, w2, o * f) for a, b, c, d_, w1, w2, o in S]
+            D = [(x, y, r, o * f) for x, y, r, o in D]
+        return S, D
+
+    def _viz_sigil_paint(self, sg, acc, now, fw, fh, aspect, ps,
+                         eb=0.0, em=0.0, wob=0.0, et=0.0):
+        """Render one structure into the frame: strokes reveal in order
+        (the sigil writes itself on), each flashing as it lands; radial
+        kinds spin slowly; the whole glyph breathes on the kick and
+        dissolves into blocks as it dies. Lines are drawn in PIXEL space
+        — hairline core + tight glow at any panel size."""
+        import numpy as np
+        age = now - sg["born"]
+        env = sg["amp"] * math.exp(-1.9 * age / sg["life"])
+        if env < 0.02:
+            return
+        ky = fh / 2.0
+        cx = (sg["x"] + aspect) * (fw / (2.0 * aspect))
+        cy = (sg["y"] + 1.0) * ky
+        # continuous audio coupling — the glyph lives BETWEEN beats:
+        # bass pumps its size, mids wobble its bones (the dubstep LFO
+        # reads as the sigil writhing), brightness rides the mids below
+        sc = sg["s"] * ky * (1.0 + 0.14 * eb + 0.05 * ps)
+        rotn = sg["rot"] \
+            + sg["spin"] * age * getattr(self, "_drop_tempo", 1.0) \
+            + 0.07 * math.sin(wob) * min(1.0, em)
+        ca, sa = math.cos(rotn), math.sin(rotn)
+        wsc = max(1.0, fh / 220.0)
+        # small panels: the wide glow term blankets the whole cell grid
+        # into a grey wash — tighten it when there are few pixels
+        gm = 22.0 if fh >= 140 else 7.0
+        field = np.zeros((fh, fw), np.float32)
+        jx = np.arange(fw, dtype=np.float32)[None, :]
+        jy = np.arange(fh, dtype=np.float32)[:, None]
+        stag = 0.035 / max(0.6, getattr(self, "_drop_tempo", 1.0))
+
+        for (x1, y1, x2, y2, wa, wb, o) in sg["S"]:
+            tb = age - o * stag
+            if tb <= 0:
+                continue
+            flash = 1.0 + 0.7 * math.exp(-tb / 0.09)
+            X1 = cx + (x1 * ca - y1 * sa) * sc
+            Y1 = cy + (x1 * sa + y1 * ca) * sc
+            X2 = cx + (x2 * ca - y2 * sa) * sc
+            Y2 = cy + (x2 * sa + y2 * ca) * sc
+            wp = max(wa, wb) * wsc
+            m = wp * 5.5 + 2
+            i0 = max(0, int(min(Y1, Y2) - m))
+            i1 = min(fh, int(max(Y1, Y2) + m) + 1)
+            j0 = max(0, int(min(X1, X2) - m))
+            j1 = min(fw, int(max(X1, X2) + m) + 1)
+            if i0 >= i1 or j0 >= j1:
+                continue
+            X = jx[:, j0:j1] - X1
+            Y = jy[i0:i1] - Y1
+            ex, ey = X2 - X1, Y2 - Y1
+            L2 = ex * ex + ey * ey + 1e-6
+            t = np.clip((X * ex + Y * ey) / L2, 0.0, 1.0)
+            dxx = X - t * ex
+            dyy = Y - t * ey
+            d2 = dxx * dxx + dyy * dyy
+            # width interpolates along the segment, so a chain of these
+            # renders one continuous needle-tapered curve
+            wl = (wa + (wb - wa) * t) * wsc + 0.35
+            w2 = wl * wl
+            reg = field[i0:i1, j0:j1]
+            np.maximum(reg, (np.exp(-d2 / w2) * 1.05
+                             + np.exp(-d2 / (w2 * gm)) * 0.30) * flash,
+                       out=reg)
+        for (x, y, r, o) in sg["D"]:
+            tb = age - o * stag
+            if tb <= 0:
+                continue
+            flash = 1.0 + 0.7 * math.exp(-tb / 0.09)
+            X1 = cx + (x * ca - y * sa) * sc
+            Y1 = cy + (x * sa + y * ca) * sc
+            rp = r * wsc
+            m = rp * 5.5 + 2
+            i0 = max(0, int(Y1 - m))
+            i1 = min(fh, int(Y1 + m) + 1)
+            j0 = max(0, int(X1 - m))
+            j1 = min(fw, int(X1 + m) + 1)
+            if i0 >= i1 or j0 >= j1:
+                continue
+            d2 = (jx[:, j0:j1] - X1) ** 2 + (jy[i0:i1] - Y1) ** 2
+            reg = field[i0:i1, j0:j1]
+            np.maximum(reg, (np.exp(-d2 / (rp * rp)) * 1.1
+                             + np.exp(-d2 / (rp * rp * gm * 0.8)) * 0.3) * flash,
+                       out=reg)
+        v = field * (env * min(1.0, age / 0.03)
+                     * (1.0 + 0.22 * em + 0.15 * et))
+        core = np.clip((v - 0.78) * 3.5, 0, 1)[..., None]
+        col = np.asarray(sg["rgb"], np.float32)
+        acc += v[..., None] * (col * (1 - core) + core)
+        # consecration: the instant a strong glyph finishes writing
+        # itself, one ring of its own light expands off it — completion
+        # becomes an event instead of passing silently
+        dr = age - (11.0 * stag + 0.05)
+        if 0.0 < dr < 0.45 and sg["amp"] > 0.8:
+            rad = (0.2 + dr * 3.2) * sc
+            m2 = rad + 6 * wsc
+            i0 = max(0, int(cy - m2))
+            i1 = min(fh, int(cy + m2) + 1)
+            j0 = max(0, int(cx - m2))
+            j1 = min(fw, int(cx + m2) + 1)
+            if i0 < i1 and j0 < j1:
+                dd = np.sqrt((jx[:, j0:j1] - cx) ** 2
+                             + (jy[i0:i1] - cy) ** 2)
+                acc[i0:i1, j0:j1] += (
+                    np.exp(-((dd - rad) / (1.5 * wsc)) ** 2)
+                    * (1.0 - dr / 0.45) * 0.7)[..., None] * col
+
+    def _viz_sigil(self, w, rows, n, pad_l):
+        """Cybersigil chamber: a black void framed by two thin prismatic
+        rings; every kick detonates a fresh structure — shards, totems,
+        starbursts, data grids — that burns white-hot, tears along
+        scanlines, and dissolves into blocks until the next hit. True
+        RGB end to end: each strike rolls its own hue, the rings walk
+        the spectrum, and the beat splits the red/blue channels apart."""
+        import numpy as np
+        W = w if getattr(self, "eww_flush", False) else max(w - 4, 20)
+        H = rows * 2
+        # blocky by DESIGN (his call, after trying bitmap-native): the
+        # chunky half-block grid IS the look — the smooth kitty bitmap
+        # read as too sharp, too clinical. bonus: this mode never
+        # touches ghostty's fragile image store
+        Wpx, Hpx = W, H
+        fw, fh = W, H
+        pad = (w - W) // 2
+
+        paused = bool(self.player.props.get("pause")) or self.player.loading
+        if paused:
+            raw = (0.0, 0.0, 0.0)
+            lv = [0.0] * 18
+        elif self.tap and self.tap.producing:
+            lv = self.tap.levels(18)
+            self._drop_onset(lv)
+            raw = (sum(lv[:5]) / 5, sum(lv[5:12]) / 7, sum(lv[12:]) / 6)
+        else:
+            t0 = time.time()
+            raw = (0.4 + 0.3 * math.sin(t0 * 1.9),
+                   0.4 + 0.3 * math.sin(t0 * 1.3 + 2),
+                   0.3 + 0.2 * math.sin(t0 * 2.7 + 4))
+            lv = [raw[0]] * 5 + [raw[1]] * 7 + [raw[2]] * 6
+        now = time.time()
+        dt = min(now - self._drop_last, 0.25)
+        self._drop_last = now
+        for i, x in enumerate(raw):
+            e = self._drop_e[i]
+            k = min(1.0, (10.0 if x > e else 2.4) * dt)
+            self._drop_e[i] = e + (x - e) * k
+        pulse, en, eb, em, et = self._drop_groove(raw, dt, now)
+        ps = getattr(self, "_pulse_s", 0.0)
+        ps += (pulse - ps) * min(1.0, dt * 16.0)
+        self._pulse_s = ps
+        tp = getattr(self, "_tre_pulse", 0.0)
+
+        aspect = min(W / max(H, 1), 4.5)
+        live = getattr(self, "_sigil_live", None)
+        if live is None:
+            live = self._sigil_live = []
+            self._sigil_bt = getattr(self, "_beat_t", 0.0)
+            self._sigil_mt = getattr(self, "_mid_t", 0.0)
+        bt = getattr(self, "_beat_t", 0.0)
+        mt = getattr(self, "_mid_t", 0.0)
+        if bt > self._sigil_bt:          # the kick lands: new structure
+            self._sigil_bt = bt
+            for sg in live:              # elders yield to the new hit
+                sg["life"] = min(sg["life"], now - sg["born"] + 0.35)
+            sgn = self._viz_sigil_new(
+                now, aspect, True,
+                0.75 + 0.5 * getattr(self, "_beat_amp", 0.5),
+                self._viz_sigil_word(lv, True))
+            if getattr(self, "_beat_n", 0) % 16 == 0:
+                # phrase head: a MEGA glyph — rarity is what makes it
+                # land (constant spectacle numbs; scale hierarchy awes)
+                sgn["s"] *= 1.6
+                sgn["amp"] *= 1.25
+                sgn["life"] *= 1.6
+                self._sigil_surge = now
+            live.append(sgn)
+        elif mt > self._sigil_mt and now - bt > 0.20 \
+                and (not live or now - live[-1]["born"] > 0.22):
+            # vocal/mid transients strike smaller accents between kicks
+            live.append(self._viz_sigil_new(
+                now, aspect, False,
+                0.5 + 0.4 * getattr(self, "_mid_amp", 0.4),
+                self._viz_sigil_word(lv, False)))
+        elif now - bt > 2.5 and en > 0.28 \
+                and now - getattr(self, "_sigil_forced", 0.0) > 1.8 \
+                and (not live or now - live[-1]["born"] > 0.9):
+            # sustained-bass sections (slowed dubstep) starve the kick
+            # detector — keep the chamber alive off the energy bed
+            self._sigil_forced = now
+            live.append(self._viz_sigil_new(
+                now, aspect, True, 0.6 + 0.4 * min(1.0, en),
+                self._viz_sigil_word(lv, True)))
+        self._sigil_mt = max(getattr(self, "_sigil_mt", 0.0), mt)
+        # a few structures layered (new + dying) — the echo trails
+        # carry the rest of the history
+        live[:] = [s for s in live if now - s["born"] < s["life"]][-3:]
+
+        # ANTICIPATION: with tempo locked we know when the next hit
+        # lands — the chamber gathers into it (rings tighten, glow
+        # builds, satellites surge) and releases ON the beat. reaction
+        # alone always reads late; expectancy is where the chills live
+        antic = 0.0
+        gaps = getattr(self, "_beat_gaps", [])
+        if len(gaps) >= 4 and bt:
+            period = sorted(gaps)[len(gaps) // 2]
+            ph_b = (now - bt) / max(period, 1e-3)
+            if 0.0 < ph_b < 1.25:
+                antic = max(0.0, min(1.0, (ph_b - 0.68) / 0.32))
+
+        xs = np.linspace(-aspect, aspect, fw, dtype=np.float32)[None, :]
+        ys = np.linspace(-1.0, 1.0, fh, dtype=np.float32)[:, None]
+        acc = np.zeros((fh, fw, 3), np.float32)
+
+        tmpo = getattr(self, "_drop_tempo", 1.0)
+        wob = getattr(self, "_sigil_wob", 0.0) \
+            + dt * (2.0 + 9.0 * em) * tmpo
+        self._sigil_wob = wob
+        for sg in live:
+            self._viz_sigil_paint(sg, acc, now, fw, fh, aspect, ps,
+                                  eb, em, wob, et)
+
+        # ambient satellites: four comets orbiting the chamber — the
+        # orbit clock IS the wobble clock, so the mids speed them up,
+        # and the feedback layer stretches them into spiral light-trails
+        # that keep the frame alive even between structures
+        kxs = fw / (2.0 * aspect)
+        kys = fh / 2.0
+        orb = wob * 0.5 + antic * 0.8
+        hp = (now * 0.02) % 1.0
+        for k_ in range(4):
+            a_ = orb * (0.7 + 0.15 * k_) + k_ * math.tau / 4
+            pxo = (0.04 * math.cos(now * 0.09) + math.cos(a_) * 0.86
+                   + aspect) * kxs
+            pyo = (0.14 + math.sin(a_) * 0.86 + 1.0) * kys
+            if not (3 <= pxo < fw - 4 and 3 <= pyo < fh - 4):
+                continue
+            h6o = ((hp + k_ * 0.25) % 1.0) * 6.0
+            colo = np.array(
+                [min(max(abs(h6o - 3) - 1, 0.0), 1.0) * 0.6 + 0.4,
+                 min(max(2 - abs(h6o - 2), 0.0), 1.0) * 0.6 + 0.4,
+                 min(max(2 - abs(h6o - 4), 0.0), 1.0) * 0.6 + 0.4],
+                np.float32)
+            i0, j0 = int(pyo) - 3, int(pxo) - 3
+            yy = np.arange(i0, i0 + 7, dtype=np.float32)[:, None]
+            xx = np.arange(j0, j0 + 7, dtype=np.float32)[None, :]
+            gg = np.exp(-(((xx - pxo) ** 2 + (yy - pyo) ** 2)
+                          / (1.2 + 0.15 * (fh / 90.0) ** 2)))
+            acc[i0:i0 + 7, j0:j0 + 7] += \
+                gg[..., None] * colo * np.float32(0.55 + 0.45 * em)
+
+        # ── the trippy layer: milkdrop-style feedback — the previous
+        # frame, zoomed and slightly rotated, decays behind this one.
+        # bass pushes the tunnel outward, mids spin it, and the trail's
+        # hue drifts so motion smears into rainbow ghosts. kept at half
+        # res: the blur is free dreaminess and the cost stays flat
+        eh, ew = fh // 2, fw // 2
+        echo = getattr(self, "_sigil_echo", None)
+        if echo is None or echo.shape[:2] != (eh, ew):
+            echo = np.zeros((eh, ew, 3), np.float32)
+        z = 1.0 + (0.03 + 0.06 * eb) * tmpo
+        th = (0.008 + 0.025 * em) * tmpo
+        cz, sz = math.cos(th) / z, math.sin(th) / z
+        yc = (np.arange(eh, dtype=np.float32) - eh * 0.5)[:, None]
+        xc = (np.arange(ew, dtype=np.float32) - ew * 0.5)[None, :]
+        sx = np.clip(xc * cz - yc * sz + ew * 0.5, 0, ew - 1.001)
+        sy = np.clip(xc * sz + yc * cz + eh * 0.5, 0, eh - 1.001)
+        xi = sx.astype(np.int32)
+        yi = sy.astype(np.int32)
+        fx = (sx - xi)[..., None]
+        fy = (sy - yi)[..., None]
+        echo = (echo[yi, xi] * (1 - fx) * (1 - fy)
+                + echo[yi, xi + 1] * fx * (1 - fy)
+                + echo[yi + 1, xi] * (1 - fx) * fy
+                + echo[yi + 1, xi + 1] * fx * fy)
+        M = getattr(self, "_sigil_huem", None)
+        if M is None:
+            # true hue rotation about the grey axis — the old channel
+            # MIX converged every trail to grey fog; rotation keeps the
+            # rainbow saturated forever
+            ang = 0.10
+            c1, s1 = math.cos(ang), math.sin(ang)
+            o3, q3 = 1.0 / 3.0, math.sqrt(1.0 / 3.0)
+            M = self._sigil_huem = np.array(
+                [[c1 + o3 * (1 - c1), o3 * (1 - c1) - q3 * s1,
+                  o3 * (1 - c1) + q3 * s1],
+                 [o3 * (1 - c1) + q3 * s1, c1 + o3 * (1 - c1),
+                  o3 * (1 - c1) - q3 * s1],
+                 [o3 * (1 - c1) - q3 * s1, o3 * (1 - c1) + q3 * s1,
+                  c1 + o3 * (1 - c1)]], np.float32)
+        echo = echo @ M.T
+        # decay with a floor subtract: dim haze dies fast, bright
+        # trails live — without this the loop accumulates a grey cloud
+        echo = np.maximum(echo * (0.76 + 0.08 * em) - 0.012, 0.0)
+        feed = 0.40 + (0.18 if now - getattr(self, "_sigil_surge", -9.0)
+                       < 0.9 else 0.0)
+        echo += acc[:eh * 2:2, :ew * 2:2] * feed
+        self._sigil_echo = echo
+        acc[:eh * 2, :ew * 2] += np.repeat(
+            np.repeat(echo, 2, axis=0), 2, axis=1) * 0.5
+
+        # the chamber: two thin near-white rings that breathe on the
+        # kick, speckled, with rare full-color flecks and treble flares —
+        # the color discipline lives here: sigils carry the hues, the
+        # frame stays quiet (rainbow-everywhere read as noise). the band
+        # covers ~2% of the frame, so everything past the distance test
+        # runs per-point, not per-pixel (this is what makes native-res
+        # affordable). time seeds wrapped SMALL before float32 — a raw
+        # unix timestamp in float32 absorbs the per-pixel terms entirely
+        rw = 1.4 * (2.0 / fh)
+        hue_ph = (now * 0.02) % 1.0
+        breathe = 1.0 + 0.012 * ps + 0.022 * eb - 0.018 * antic
+        tseed = (int(now * 13) % 997) * 7.77
+        for cx_, cy_, R, sat_ in (
+                (0.05 * math.sin(now * 0.11), -0.52, 1.32, 0.22),
+                (0.04 * math.cos(now * 0.09), 0.14, 0.90, 0.12)):
+            dx = xs - cx_
+            dy = ys - cy_
+            rr = np.sqrt(dx * dx + dy * dy)
+            Re = R * breathe
+            m = np.abs(rr - Re) < rw * 3.2
+            if not m.any():
+                continue
+            my, mx = np.nonzero(m)
+            band = np.exp(-(((rr[m] - Re) / rw) ** 2))
+            hsp = np.sin(mx * 12.9898 + my * 78.233 + tseed) * 43758.5453
+            hsp = (hsp - np.floor(hsp)).astype(np.float32)
+            angv = np.arctan2(dy[my, 0], dx[0, mx])
+            frac = (angv * (24.0 / math.tau)) % 1.0
+            tickm = ((frac < 0.055) | (frac > 0.945)).astype(np.float32)
+            h6 = ((angv * (1.0 / math.tau) + hue_ph) % 1.0) * 6.0
+            hue = np.stack([np.clip(np.abs(h6 - 3) - 1, 0, 1),
+                            np.clip(2 - np.abs(h6 - 2), 0, 1),
+                            np.clip(2 - np.abs(h6 - 4), 0, 1)], -1)
+            col = np.where((hsp > 0.982)[:, None],
+                           hue, 1.0 - sat_ * (1.0 - hue))
+            amp = band * (0.26 + 0.18 * tp + 0.10 * antic
+                          + 0.20 * tickm + 0.38 * hsp ** 3
+                          + (1.0 * tp + 0.5 * em) * hsp ** 8)
+            acc[my, mx] += col * amp[:, None]
+
+
+        if tp > 0.3:          # hats: a few stray static pixels in the void
+            st = np.sin(np.arange(fw, dtype=np.float32)[None, :] * 45.233
+                        + np.arange(fh, dtype=np.float32)[:, None] * 91.187
+                        + (int(now * 21) % 997) * 3.3) * 43758.5453
+            st = st - np.floor(st)
+            acc += (st > 1.0 - 0.0005 - 0.0012 * tp)[..., None] \
+                * np.float32(0.45)
+
+        if now - getattr(self, "_sigil_surge", -9.0) < 0.045:
+            acc *= 0.3          # one-beat blackout → the bloom hits harder
+
+        # paused: the chamber powers DOWN — rings and all fade to black
+        # in about a second instead of glowing forever
+        if paused:
+            pt = getattr(self, "_sigil_pt", 0.0) or now
+            self._sigil_pt = pt
+            acc *= math.exp(-max(0.0, now - pt) / 0.9)
+        else:
+            self._sigil_pt = 0.0
+
+        # chromatic aberration: faint red/blue ghosts a pixel or two off
+        # on the hit — max-blend keeps thin features white-cored; kept
+        # subtle, at 0.85 it tripled every ring into a nest of copies
+        d = max(1, int(round((0.6 + 1.2 * ps) * fw / 520.0)))
+        acc[..., 0] = np.maximum(acc[..., 0],
+                                 np.roll(acc[..., 0], d, axis=1) * 0.5)
+        acc[..., 2] = np.maximum(acc[..., 2],
+                                 np.roll(acc[..., 2], -d, axis=1) * 0.5)
+
+        rgb = np.clip(acc * 255.0, 0, 255).astype(np.uint8)
+        # text render: quantize each half-block to 4 bits/channel and
+        # cache the escape strings. 4 bits (not 5) on purpose: it caps
+        # the whole mode at 4096 distinct colors, both for the string
+        # cache and for the TERMINAL — a stream minting thousands of
+        # never-seen-before styles every frame is exactly the load
+        # ghostty 1.3's parser has open crash reports about, and the
+        # glow gradients can't show the difference
+        t4 = rgb[0::2].astype(np.uint32) >> 4
+        b4 = rgb[1::2].astype(np.uint32) >> 4
+        code = ((((t4[..., 0] << 8) | (t4[..., 1] << 4) | t4[..., 2]) << 12)
+                | ((b4[..., 0] << 8) | (b4[..., 1] << 4) | b4[..., 2]))
+        cache = getattr(self, "_viz_sigil_sgr", None)
+        if cache is None or len(cache) > 30000:
+            cache = self._viz_sigil_sgr = {}
+        left, right = " " * pad, " " * (w - pad - W)
+        lines = []
+        for row in code.tolist():
+            parts = []
+            ap = parts.append
+            for cd in row:
+                s = cache.get(cd)
+                if s is None:
+                    tq, bq = cd >> 12, cd & 0xFFF
+                    s = cache.setdefault(cd, (
+                        f"\x1b[38;2;{(tq >> 8) * 255 // 15};"
+                        f"{((tq >> 4) & 15) * 255 // 15};"
+                        f"{(tq & 15) * 255 // 15}m"
+                        f"\x1b[48;2;{(bq >> 8) * 255 // 15};"
+                        f"{((bq >> 4) & 15) * 255 // 15};"
+                        f"{(bq & 15) * 255 // 15}m▀"))
+                ap(s)
+            lines.append(left + "".join(parts) + RESET + right)
         return lines
 
     def _viz_bands(self, w, rows, n, pad_l):
@@ -6333,6 +7160,15 @@ class App:
                 # key — smooth motion AND nothing left to backlog
                 if time.time() - getattr(self, "_key_t", 0.0) < 0.4:
                     tick = min(tick, 0.012)
+                # HARD ceiling on kitty-graphics frame rate, applied AFTER
+                # every override so nothing undoes it: ghostty's image
+                # store segfaults under sustained high-rate transmits (the
+                # old 125fps crash), and the splash/key overrides above
+                # were quietly pushing pixel modes right back there. sigil
+                # frames compress tiny so even 60/s is hot — cap it at 30.
+                if getattr(self, "drop_px", 0) == 2 \
+                        and self.viz_style in ("drop", "cover"):
+                    tick = max(tick, 0.016)
                 # constant cadence: sleep what's left of the tick after
                 # the last render, so frame intervals don't see-saw
                 # between tick and tick+render — that wobble reads as
